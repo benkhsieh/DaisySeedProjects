@@ -10,7 +10,12 @@ $(wildcard Hardware-Modules/*.cpp)
 CPP_SOURCES += Effect-Modules/base_effect_module.cpp
 
 # Naming the module sources explicitly to make it easier to add/remove from build. Otherwise all global attributes
-#  will be included in the build and take up memory resources, even when the .h file is commented out. 
+#  will be included in the build and take up memory resources, even when the .h file is commented out.
+#
+# TO ADD A NEW EFFECT MODULE:
+#   Add a line below in the format:
+#     CPP_SOURCES += Effect-Modules/my_effect_module.cpp
+#   Also remember to update loaded_effects.h (see the guide at the top of that file).
 
 CPP_SOURCES += Effect-Modules/amp_module.cpp
 CPP_SOURCES += Effect-Modules/autopan_module.cpp

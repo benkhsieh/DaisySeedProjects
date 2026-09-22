@@ -220,7 +220,7 @@ void BaseEffectModule::OnNoteOff(float notenumber, float velocity) {
 }
 
 int BaseEffectModule::GetParameterMin(int parameter_id) const {
-    if (m_paramMetaData != nullptr && parameter_id < m_paramCount) {
+    if (m_paramMetaData != nullptr && parameter_id >= 0 && parameter_id < m_paramCount) {
         return m_paramMetaData[parameter_id].minValue;
     }
 
@@ -228,7 +228,7 @@ int BaseEffectModule::GetParameterMin(int parameter_id) const {
 }
 
 int BaseEffectModule::GetParameterMax(int parameter_id) const {
-    if (m_paramMetaData != nullptr && parameter_id < m_paramCount) {
+    if (m_paramMetaData != nullptr && parameter_id >= 0 && parameter_id < m_paramCount) {
         return m_paramMetaData[parameter_id].maxValue;
     }
 
@@ -236,7 +236,7 @@ int BaseEffectModule::GetParameterMax(int parameter_id) const {
 }
 
 float BaseEffectModule::GetParameterFineStepSize(int parameter_id) const {
-    if (m_paramMetaData != nullptr && parameter_id < m_paramCount) {
+    if (m_paramMetaData != nullptr && parameter_id >= 0 && parameter_id < m_paramCount) {
         return m_paramMetaData[parameter_id].fineStepSize;
     }
     return 0.01f;

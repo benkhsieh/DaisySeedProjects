@@ -57,7 +57,7 @@ GuitarPedalUI guitarPedalUI;
 
 // Hardware Related Variables
 bool useDebugDisplay = false;
-bool effectOn = false;
+bool effectOn = true;
 
 bool muteOn = false;
 float muteOffTransitionTimeInSeconds = 0.02f;
@@ -634,8 +634,8 @@ int main(void) {
     // Setup the cross fader
     crossFaderLeft.Init();
     crossFaderRight.Init();
-    crossFaderLeft.SetPos(0.0f);
-    crossFaderRight.SetPos(0.0f);
+    crossFaderLeft.SetPos(1.0f);
+    crossFaderRight.SetPos(1.0f);
 
     // start callback
     hardware.StartAdc();

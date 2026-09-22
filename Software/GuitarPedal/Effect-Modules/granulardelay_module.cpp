@@ -152,8 +152,6 @@ void GranularDelayModule::ProcessMono(float in) {
 
     float input = in;
 
-    float looperOutput = 0.0;
-
     if (!m_loop_recorded) {
         if (first_count == 0) {
             m_looper.TrigRecord();
@@ -168,8 +166,7 @@ void GranularDelayModule::ProcessMono(float in) {
 
     // If not in Hold mode, process the next sample into looper
     if (!m_hold) {
-
-        looperOutput = m_looper.Process(input);
+        m_looper.Process(input);
     }
 
     /** Processes the granular player.

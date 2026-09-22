@@ -66,7 +66,7 @@ void IrModule::ParameterChanged(int parameter_id) {
 //}
 
 void IrModule::SelectIR() {
-    unsigned int irIndex = GetParameterAsBinnedValue(0) - 1;
+    int irIndex = GetParameterAsBinnedValue(0) - 1;
     if (irIndex != m_currentIRindex) {
         mIR.Init(ir_collection_large[irIndex]); // ir_data is from ir_data_large.h
     }

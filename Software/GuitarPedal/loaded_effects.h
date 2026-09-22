@@ -1,5 +1,28 @@
 // Edit the contents of this file to populate the available effects that you
 // want to use
+//
+// ============================================================
+// HOW TO ADD A NEW EFFECT MODULE
+// ============================================================
+// Adding an effect requires touching FOUR places in order:
+//
+//   STEP 1: Create the effect files
+//             Effect-Modules/my_effect_module.h
+//             Effect-Modules/my_effect_module.cpp
+//
+//   STEP 2: Add the #include below in the "Include all effect modules" section
+//             #include "Effect-Modules/my_effect_module.h"
+//
+//   STEP 3: Add instantiation in the effectList array in load_effects() below
+//             new MyEffectModule(),
+//
+//   STEP 4: Add the .cpp source in Makefile (see CPP_SOURCES section there)
+//             CPP_SOURCES += Effect-Modules/my_effect_module.cpp
+//
+// NOTE: Steps 2-4 must ALL be done. Missing any one step causes silent
+//       failures (missing include = compile error; missing array entry =
+//       effect never available; missing Makefile entry = linker error).
+// ============================================================
 
 #ifndef LOADED_EFFECTS_H
 #define LOADED_EFFECTS_H

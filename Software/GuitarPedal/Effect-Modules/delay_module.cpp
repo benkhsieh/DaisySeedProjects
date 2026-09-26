@@ -3,10 +3,11 @@
 
 using namespace bkshepherd;
 
-static const char *s_waveBinNames[6] = {"Sine", "Triangle", "Saw", "Ramp",
-                                        "Square", "Tape"}; //, "Poly Tri", "Poly Saw", "Poly Sqr"};  // Horrible loud sound when switching to
-                                                   // poly tri, not every time, TODO whats going on? (I suspect electro smith broke
-                                                   // the poly tri osc, the same happens in the tremolo too)
+static const char *s_waveBinNames[6] = {
+    "Sine", "Triangle", "Saw",
+    "Ramp", "Square",   "Tape"}; //, "Poly Tri", "Poly Saw", "Poly Sqr"};  // Horrible loud sound when switching to
+                                 // poly tri, not every time, TODO whats going on? (I suspect electro smith broke
+                                 // the poly tri osc, the same happens in the tremolo too)
 static const char *s_modParamNames[4] = {"None", "DelayTime", "DelayLevel", "DelayPan"};
 static const char *s_delayModes[3] = {"Normal", "Triplett", "Dotted 8th"};
 static const char *s_delayTypes[6] = {"Forward", "Reverse", "Octave", "ReverseOct", "Dual", "DualOct"};
@@ -207,6 +208,16 @@ void DelayModule::Init(float sample_rate) {
     CalculateDelayMix();
 }
 
+void DelayModule::Reset() {
+    // Clear every delay line so a NaN or runaway feedback value cannot recirculate.
+    // Parameters, targets, and filters are left alone.
+    delayLineLeft.Reset();
+    delayLineRight.Reset();
+    delayLineRevLeft.Reset();
+    delayLineRevRight.Reset();
+    delayLineSpread.Reset();
+}
+
 void DelayModule::ParameterChanged(int parameter_id) {
     if (parameter_id == 0) { // Delay Time
         UpdateLEDRate();
@@ -277,7 +288,7 @@ void DelayModule::ProcessModulation() {
 
         if (waveForm == 5) {
             // Tape flutter mode with dynamic min
-            const float M     = wowDepth + 0.2f * flutterDepth; // Max amplitude of tape modulation.
+            const float M = wowDepth + 0.2f * flutterDepth; // Max amplitude of tape modulation.
             const float depth = 500.0f;
 
             float baseMin = D_min + M * mod_amount * depth;
@@ -286,7 +297,7 @@ void DelayModule::ProcessModulation() {
             float base = baseMin + (baseMax - baseMin) * timeParam;
 
             delayTarget = base + mod * mod_amount * depth;
-        } else {        
+        } else {
             delayTarget = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam + mod * mod_amount * 500;
         }
         if (delayTarget < D_min) {
@@ -296,7 +307,7 @@ void DelayModule::ProcessModulation() {
             delayTarget = MAX_DELAY_NORM - 2;
         }
 
-        delayLeft.delayTarget  = delayTarget;
+        delayLeft.delayTarget = delayTarget;
         delayRight.delayTarget = delayTarget;
     } else if (modParam == 2) {
         float mod_level = mod * mod_amount + (1.0 - mod_amount);

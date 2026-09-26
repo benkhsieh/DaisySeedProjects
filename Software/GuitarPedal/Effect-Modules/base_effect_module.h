@@ -258,6 +258,14 @@ class BaseEffectModule {
      */
     virtual void SetTempo(uint32_t bpm);
 
+    /** Clears any internal audio state (delay lines, filters, feedback paths) without
+     *  reallocating or touching parameters. Called by the crash guard after the module
+     *  produced non-finite output. The default does nothing; modules with feedback
+     *  memory should override it. Must be safe to call from the main loop while the
+     *  audio callback is running.
+     */
+    virtual void Reset();
+
     /** Handles updating the custom UI for this Effect.
      * @param elapsedTime a float value of how much time (in seconds) has elapsed since the last update
      */

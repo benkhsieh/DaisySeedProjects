@@ -406,6 +406,10 @@ void BaseEffectModule::SetTempo(uint32_t bpm) {
     // Effect modules are expected to override this fucntion if they are time based.
 }
 
+void BaseEffectModule::Reset() {
+    // Do nothing by default. Modules with delay lines or feedback override this.
+}
+
 void BaseEffectModule::ParameterChanged(int parameter_id) {
     // Do nothing.
 }

@@ -2,9 +2,9 @@
 #ifndef DELAY_MODULE_H
 #define DELAY_MODULE_H
 
+#include "../Util/tape_modulator.h"
 #include "Delays/delayline_reverse.h"
 #include "Delays/delayline_revoct.h"
-#include "../Util/tape_modulator.h"
 #include "base_effect_module.h"
 #include "daisysp.h"
 #include <stdint.h>
@@ -127,6 +127,7 @@ class DelayModule : public BaseEffectModule {
     void ProcessMono(float in) override;
     void ProcessStereo(float inL, float inR) override;
     void SetTempo(uint32_t bpm) override;
+    void Reset() override;
     float GetBrightnessForLED(int led_id) const override;
 
   private:

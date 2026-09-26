@@ -67,6 +67,18 @@ constexpr float kWatchdogTimeoutSeconds = 2.0f;
 
 bool effectOn = true;
 
+// The effectOn value the audio callback last applied (SetEnabled, crossfade, relay and
+// mute). The callback compares effectOn against this every block, so a change made
+// anywhere (footswitch in the callback, or SetActiveEffect in the main loop via menu,
+// encoder, MIDI or a tuner quick switch) runs the same transition. Set in main() before
+// audio starts.
+static bool appliedEffectOn = true;
+
+// Effect switch requested by the audio callback (tuner quick switch, or cycling on a
+// screenless pedal). SetActiveEffect rebuilds UI heap arrays, so it must not run in the
+// interrupt; the main loop performs the switch. -1 means no request.
+volatile int pendingEffectID = -1;
+
 bool muteOn = false;
 float muteOffTransitionTimeInSeconds = 0.02f;
 int muteOffTransitionTimeInSamples;
@@ -129,8 +141,6 @@ int guardMuteSamplesRemaining = 0;
 uint32_t guardTripCount = 0;
 const float guardMuteTimeInSeconds = 0.02f;
 int guardMuteTimeInSamples;
-
-void SetActiveEffect(int effectID);
 
 static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
     cpuLoadMeter.OnBlockStart();
@@ -199,10 +209,6 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
         }
     }
 
-    // Store the previous value of the effect bypass so that we can determine if
-    // we need to perform a toggle at the end of processing the switches
-    bool oldEffectOn = effectOn;
-
     // Process potential footswitch actions before the main switch processing loop
     if (has_alternate_footswitch) {
         // Handle the scenario where have 2 footswitches
@@ -232,10 +238,11 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
                 // so SetActiveEffect saves and restores the state the player actually had.
                 effectOn = !effectOn;
 
+                // The main loop performs the switch (see pendingEffectID).
                 if (activeEffectID == tunerModuleIndex) {
-                    SetActiveEffect(prevActiveEffectID);
+                    pendingEffectID = prevActiveEffectID;
                 } else {
-                    SetActiveEffect(tunerModuleIndex);
+                    pendingEffectID = tunerModuleIndex;
                 }
                 ignoreBypassSwitchUntilNextActuation = true;
             } else {
@@ -251,9 +258,10 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
                     newActiveEffectId = 0;
                 }
 
-                // Cycling on a screenless pedal lands on the new effect bypassed.
+                // Cycling on a screenless pedal lands on the new effect bypassed. The main
+                // loop performs the switch (see pendingEffectID).
                 effectOn = false;
-                SetActiveEffect(newActiveEffectId);
+                pendingEffectID = newActiveEffectId;
 
                 ignoreBypassSwitchUntilNextActuation = true;
             }
@@ -343,16 +351,24 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
         hardware.SetAudioMute(false);
     }
 
-    // Handle Effect State being Toggled.
-    if (effectOn != oldEffectOn) {
+    // Handle Effect State being Toggled, here or by the main loop since the last block.
+    if (effectOn != appliedEffectOn) {
+        appliedEffectOn = effectOn;
+
         // Set the stats on the effect
         if (activeEffect != nullptr) {
             activeEffect->SetEnabled(effectOn);
         }
 
-        // Setup the crossfade
+        // Setup the crossfade. If a fade is still running (a quick switch can reverse one a
+        // block after it starts), continue from its current position instead of jumping
+        // to the far end, which would click.
+        if (isCrossFading) {
+            samplesTilCrossFadingComplete = crossFaderTransitionTimeInSamples - samplesTilCrossFadingComplete;
+        } else {
+            samplesTilCrossFadingComplete = crossFaderTransitionTimeInSamples;
+        }
         isCrossFading = true;
-        samplesTilCrossFadingComplete = crossFaderTransitionTimeInSamples;
         isCrossFadingForward = effectOn;
 
         // Start the timing sequence for the Hardware Mute and Relay Bypass.
@@ -679,6 +695,7 @@ int main(void) {
     // Set the active effect directly. SetActiveEffect cannot be used here because it
     // refreshes the UI, which is initialized below from the chosen effect. Apply the same
     // rules it enforces: the tuner is always forced on, and the module takes effectOn.
+    // Keep in sync with the tuner rule in SetActiveEffect.
     activeEffectID = settings.globalActiveEffectID;
     activeEffect = availableEffects[activeEffectID];
     if (activeEffectID == tunerModuleIndex) {
@@ -686,6 +703,10 @@ int main(void) {
         effectOn = true;
     }
     activeEffect->SetEnabled(effectOn);
+
+    // The startup state is already applied, so the first audio block must not treat it as
+    // a toggle.
+    appliedEffectOn = effectOn;
 
     // Init the Menu UI System
     if (hardware.SupportsDisplay()) {
@@ -790,6 +811,13 @@ int main(void) {
             guardTripped = false;
             guardTripCount += 1;
             activeEffect->Reset();
+        }
+
+        // Perform an effect switch the audio callback asked for.
+        if (pendingEffectID != -1) {
+            int id = pendingEffectID;
+            pendingEffectID = -1;
+            SetActiveEffect(id);
         }
 
         // If alt footswitch held AND encoder turned, iterate to next/previous effect, also throttle the changes

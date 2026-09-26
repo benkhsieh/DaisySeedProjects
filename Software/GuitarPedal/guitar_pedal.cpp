@@ -717,14 +717,6 @@ int main(void) {
             }
         }
 
-        // Recover from non-finite audio: clear the effect's internal state so the bad
-        // value cannot keep recirculating. Parameters are untouched.
-        if (guardTripped) {
-            guardTripped = false;
-            guardTripCount += 1;
-            activeEffect->Reset();
-        }
-
         // Handle Global Tempo Changes
         if (needToChangeTempo) {
             activeEffect->SetTempo(globalTempoBPM);
@@ -732,6 +724,14 @@ int main(void) {
 
             // Update the effect parameters on the menu system to reflect any changes
             guitarPedalUI.UpdateActiveEffectParameterValues();
+        }
+
+        // Recover from non-finite audio: clear the effect's internal state so the bad
+        // value cannot keep recirculating. Parameters are untouched.
+        if (guardTripped) {
+            guardTripped = false;
+            guardTripCount += 1;
+            activeEffect->Reset();
         }
 
         // If alt footswitch held AND encoder turned, iterate to next/previous effect, also throttle the changes

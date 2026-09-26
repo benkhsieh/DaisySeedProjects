@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "UI/guitar_pedal_ui.h"
+#include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
 
 using namespace daisy;
@@ -112,6 +113,15 @@ float crossFaderTransitionTimeInSeconds = 0.1f;
 int crossFaderTransitionTimeInSamples;
 int samplesTilCrossFadingComplete;
 CpuLoadMeter cpuLoadMeter;
+
+// Audio guard state. The callback sets guardTripped when the active effect produced a
+// non-finite sample; the main loop resets the effect and clears the flag. While
+// guardMuteSamplesRemaining > 0 the output is silenced so the recovery is inaudible.
+volatile bool guardTripped = false;
+int guardMuteSamplesRemaining = 0;
+uint32_t guardTripCount = 0;
+const float guardMuteTimeInSeconds = 0.02f;
+int guardMuteTimeInSamples;
 
 void SetActiveEffect(int effectID);
 
@@ -384,9 +394,10 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
             }
         }
 
-        // Handle Mono vs Stereo
-        inputLeft = in[0][i];
-        inputRight = in[1][i];
+        // Handle Mono vs Stereo. Clamp so a hot signal or a codec glitch cannot push an
+        // out-of-range value into an effect's feedback path.
+        inputLeft = audio_guard::ClampInput(in[0][i]);
+        inputRight = audio_guard::ClampInput(in[1][i]);
 
         // Split the Mono Input to Stereo (Only allowed if relay bypass non enabled)
         if (settings.globalSplitMonoInputToStereo && !settings.globalRelayBypassEnabled) {
@@ -413,6 +424,13 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
             effectOutputLeft = activeEffect->GetAudioLeft();
             effectOutputRight = activeEffect->GetAudioRight();
 
+            // Never let NaN or infinity reach the DAC. Flag it so the main loop can
+            // reset the effect, and mute briefly so the recovery does not pop.
+            if (audio_guard::SanitizePair(effectOutputLeft, effectOutputRight)) {
+                guardTripped = true;
+                guardMuteSamplesRemaining = guardMuteTimeInSamples;
+            }
+
             // Update state of the LEDs
             led1Brightness = activeEffect->GetBrightnessForLED(0);
             led2Brightness = activeEffect->GetBrightnessForLED(1);
@@ -424,6 +442,12 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
 
         out[0][i] = crossFaderLeft.Process(crossFadeSourceLeft, crossFadeTargetLeft);
         out[1][i] = crossFaderRight.Process(crossFadeSourceRight, crossFadeTargetRight);
+
+        if (guardMuteSamplesRemaining > 0) {
+            guardMuteSamplesRemaining -= 1;
+            out[0][i] = 0.0f;
+            out[1][i] = 0.0f;
+        }
     }
 
     // Override LEDs if we are saving the current settings
@@ -580,6 +604,7 @@ int main(void) {
     muteOffTransitionTimeInSamples = hardware.GetNumberOfSamplesForTime(muteOffTransitionTimeInSeconds);
     bypassToggleTransitionTimeInSamples = hardware.GetNumberOfSamplesForTime(bypassToggleTransitionTimeInSeconds);
     crossFaderTransitionTimeInSamples = hardware.GetNumberOfSamplesForTime(crossFaderTransitionTimeInSeconds);
+    guardMuteTimeInSamples = hardware.GetNumberOfSamplesForTime(guardMuteTimeInSeconds);
 
     // Init the Effects Modules
     load_effects(availableEffectsCount, availableEffects);
@@ -692,6 +717,14 @@ int main(void) {
             }
         }
 
+        // Recover from non-finite audio: clear the effect's internal state so the bad
+        // value cannot keep recirculating. Parameters are untouched.
+        if (guardTripped) {
+            guardTripped = false;
+            guardTripCount += 1;
+            activeEffect->Reset();
+        }
+
         // Handle Global Tempo Changes
         if (needToChangeTempo) {
             activeEffect->SetTempo(globalTempoBPM);
@@ -747,6 +780,9 @@ int main(void) {
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.SetCursor(0, 45);
                 sprintf(strbuff, "BPM %ld", globalTempoBPM);
+                hardware.display.WriteString(strbuff, Font_7x10, true);
+                hardware.display.SetCursor(70, 45);
+                sprintf(strbuff, "grd %lu", (unsigned long)guardTripCount);
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.Update();
             } else {

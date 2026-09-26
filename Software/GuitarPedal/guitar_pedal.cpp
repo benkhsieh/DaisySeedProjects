@@ -6,6 +6,12 @@
 #include "UI/guitar_pedal_ui.h"
 #include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
+#include "Util/crash_record.h"
+
+namespace bkshepherd {
+extern CrashRecord g_crashRecord;
+void InstallCrashHandler();
+} // namespace bkshepherd
 
 using namespace daisy;
 using namespace daisysp;
@@ -594,6 +600,48 @@ int main(void) {
     const bool boost = true; // true enables cpu boost (480Mhz instead of 400Mhz)
 
     hardware.Init(blockSize, boost);
+
+    // Backup SRAM holds the last crash record across reboots. Enable it before reading.
+    System::InitBackupSram();
+
+    // Route hard faults to our handler so the next boot can say what crashed.
+    InstallCrashHandler();
+
+    // Report a crash from the previous run: the record on the screen for two seconds and
+    // five fast blinks of both LEDs, then clear it so it is reported only once.
+    if (CrashRecordIsValid(g_crashRecord)) {
+        if (hardware.SupportsDisplay()) {
+            char line[32];
+            hardware.display.Fill(false);
+            hardware.display.SetCursor(0, 0);
+            hardware.display.WriteString("CRASH last run", Font_7x10, true);
+            hardware.display.SetCursor(0, 14);
+            snprintf(line, sizeof(line), "pc %08lx", (unsigned long)g_crashRecord.pc);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 26);
+            snprintf(line, sizeof(line), "lr %08lx", (unsigned long)g_crashRecord.lr);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 38);
+            snprintf(line, sizeof(line), "cfsr %08lx", (unsigned long)g_crashRecord.cfsr);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 50);
+            snprintf(line, sizeof(line), "fx %ld  %lus", (long)g_crashRecord.effectID,
+                     (unsigned long)(g_crashRecord.uptimeMs / 1000u));
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.Update();
+        }
+        for (int i = 0; i < 5; i++) {
+            hardware.SetLed(0, 1.0f);
+            hardware.SetLed(1, 1.0f);
+            hardware.UpdateLeds();
+            System::Delay(200);
+            hardware.SetLed(0, 0.0f);
+            hardware.SetLed(1, 0.0f);
+            hardware.UpdateLeds();
+            System::Delay(200);
+        }
+        CrashRecordClear(g_crashRecord);
+    }
 
     const float sample_rate = hardware.AudioSampleRate();
 

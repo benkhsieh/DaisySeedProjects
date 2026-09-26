@@ -146,10 +146,23 @@ A dedicated pitch-down module, so the general Pitch module's six knobs are not n
 
 ### 6.3 TapeEcho
 
-A tape echo modeled on the Roland RE-201 Space Echo control set, with the Akai Headrush E2's adjustable wow and flutter. Reuses the delay engine and the tape modulator that the Delay module gained in January 2026, and adds the two things a tape echo has that the Delay does not: saturation in the feedback loop and multiple playback heads.
+A standalone tape echo module, separate from the Delay module and listed as "TapeEcho". Its default sound is a rockabilly slapback: one fast repeat, slightly dark, with a touch of tape wobble. Every control can be turned away from that into longer Space Echo style repeats.
 
-- Parameters: `Rate` (knob 0, delay time 40 to 800 ms, tap tempo sets it), `Repeats` (knob 1, feedback 0 to 1.1, so it can self-oscillate like the original but is limited by the saturator), `Echo Vol` (knob 2, wet mix), `Wow Flut` (knob 3, wow and flutter depth, 0 = clean digital), `Tone` (knob 4, low-pass in the feedback path, so each repeat gets darker), `Heads` (knob 5, binned: 1, 2, 3, 1+2, 2+3, 1+2+3, 1+3). Head spacing follows the RE-201: head 2 at 2x and head 3 at 3x the head 1 time.
-- Feedback loop: soft-clip saturation before the filter, so runaway repeats compress instead of clipping hard. This also keeps the loop finite, which matters for section 2.3.
+Modeled on the Roland RE-201 Space Echo control set, with the Akai Headrush E2's adjustable wow and flutter. Reuses the delay engine and the tape modulator that the Delay module gained in January 2026, and adds the two things a tape echo has that the Delay does not: saturation in the feedback loop and multiple playback heads.
+
+- Parameters and slapback defaults:
+
+  | Knob | Parameter | Range | Default |
+  |---|---|---|---|
+  | 0 | `Rate` | 40 to 800 ms, log curve so the slapback region 80 to 160 ms occupies the first third of the knob; tap tempo sets it | 120 ms |
+  | 1 | `Repeats` | feedback 0 to 1.1, self-oscillates at the top but is limited by the saturator | 0.25, about one audible repeat |
+  | 2 | `Echo Vol` | wet level 0 to 1 | 0.55 |
+  | 3 | `Wow Flut` | wow and flutter depth, 0 = clean digital | 0.15 |
+  | 4 | `Tone` | low-pass in the feedback path, each repeat gets darker | 0.6, about 4 kHz |
+  | 5 | `Heads` | binned: 1, 2, 3, 1+2, 2+3, 1+2+3, 1+3 | 1 |
+
+  Head spacing follows the RE-201: head 2 at 2x and head 3 at 3x the head 1 time. Defaults are what the module loads on first boot and after a preset erase; players save their own presets over them as with every other effect.
+- Feedback loop: soft-clip saturation before the filter, so runaway repeats compress instead of clipping hard. This also keeps the loop finite, which matters for section 2.3. The saturator also gives the single slapback repeat a little grit, which is part of the sound.
 - Alt footswitch: double tap sets Rate from tempo. Alt hold: repeats to maximum while held, for the Space Echo self-oscillation trick, returning on release.
 - LED 1 pulses at the delay rate.
 - Stereo: same echo on both channels. Spread and ping-pong omitted in this version.
@@ -174,7 +187,7 @@ There is no host build, so testing is on hardware plus CI.
   - Gestures: each row of the section 3 table, including that a Bypass tap never triggers the module's Alt action.
   - Crash guard: run the Delay with feedback at maximum into a squeal for 30 seconds, then Pitch at an octave with the guitar feeding back into the amp. Expect at worst a brief dropout, never a frozen pedal.
   - Groups: build a group of four, cycle it with Both tap, confirm wrap, confirm knobs do not jump on switch, power cycle and confirm the group survives.
-  - AmpTrem, Drop, TapeEcho: knobs, tap tempo on AmpTrem and TapeEcho, Drop Moment mode on Alt hold, TapeEcho self-oscillation on Alt hold, LED behavior.
+  - AmpTrem, Drop, TapeEcho: knobs, tap tempo on AmpTrem and TapeEcho, Drop Moment mode on Alt hold, TapeEcho self-oscillation on Alt hold, LED behavior. TapeEcho at defaults with all knobs centered-by-default must sound like a rockabilly slapback with no adjustment.
   - IR: Alt cycles and wraps.
 
 ## 9. Sequence

@@ -38,11 +38,11 @@ Fix: `SetActiveEffect` calls `SetEnabled(false)` on the outgoing module and `Set
 Root cause is not confirmed. Two mechanisms are consistent with the report:
 
 - A feedback path (delay, reverb, CloudSeed) driven hard produces `inf`, then `NaN`. Several modules derive buffer indices from float state. A `NaN` cast to an integer index is undefined and can read or write outside a delay buffer, which is a hard fault on this MCU. The pedal then sits silent with LEDs frozen until power cycle.
-- Switching effects while the UI rebuilds its menu arrays is a main-loop-only operation and should be safe. It stays on the suspect list only if the guard below does not stop the crashes.
+- Switching effects rebuilds the UI's menu arrays on the heap. The tuner quick switch (hold Bypass) used to do this from inside the audio interrupt while the main loop could be drawing those arrays or inside malloc. That is a plausible cause of the crash-on-switching reports and is fixed in Phase 1: the callback now only records a pending effect ID and the main loop performs the switch.
 
 Mitigations, all three:
 
-1. **Output sanitizer** in the audio callback: after the active effect processes a sample, if either output is not finite, replace it with 0 and count the event. If a block ends with any non-finite output, re-`Init` the active effect on the next main-loop pass and mute for 20 ms. This bounds the damage to a short dropout.
+1. **Output sanitizer** in the audio callback: after the active effect processes a sample, if either output is not finite, replace it with 0 and count the event. The project compiles with `-Ofast`, under which `std::isfinite` is folded to true, so the test must inspect the float's exponent bits directly, and the host tests must build with the same fast-math flags. If a block ends with any non-finite output, re-`Init` the active effect on the next main-loop pass and mute for 20 ms. This bounds the damage to a short dropout.
 2. **Input clamp**: clamp codec input to [-1, 1] before processing. Costs nothing and removes one class of overflow.
 3. **Independent watchdog** (IWDG, 2 s) kicked from the main loop. A hard fault or hang becomes a 2-second reboot instead of a frozen pedal. libDaisy exposes this directly.
 

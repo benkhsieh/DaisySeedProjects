@@ -1721,6 +1721,15 @@ dfu-util -a 0 -s 0x90040000:leave -D ~/Downloads/pedal-fw/125B.bin -d ,0483:df11
 ```
 Run every hardware check from Tasks 2, 4, 6, 7, and 8 on this exact binary. All must pass.
 
+Add one more, the forced-NaN test, because a Delay at maximum feedback with clamped input has loop gain at most 1 and may never produce a NaN on its own. Temporarily add to the top of the `while (1)` loop in `main()`:
+```cpp
+        if (hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)].TimeHeldMs() > 5000 &&
+            activeEffect != nullptr) {
+            activeEffect->SetParameterAsFloat(1, __builtin_nanf("")); // Delay: D Feedback becomes NaN
+        }
+```
+Build, flash, select Delay, play, hold Alt for 5 seconds. Expected: a dropout of about 20 ms, the effect keeps working afterward, and with `useDebugDisplay` temporarily true the `grd` counter has advanced by a small number and then stops. If the counter keeps climbing, `DelayModule::Reset` is not clearing something. Remove the block afterward and confirm with `git diff`.
+
 - [ ] **Step 4: Flash Steve's pedal**
 
 Same command with Steve's pedal. Then on Steve's pedal:

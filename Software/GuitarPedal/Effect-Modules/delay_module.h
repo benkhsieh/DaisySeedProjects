@@ -131,6 +131,13 @@ class DelayModule : public BaseEffectModule {
     float GetBrightnessForLED(int led_id) const override;
 
   private:
+    /** Delay time in samples set by the Delay Time parameter, before any modulation. */
+    float DelayTimeTargetSamples() const;
+    /** Right-channel spread delay in samples set by the D Spread parameter. */
+    float SpreadTargetSamples() const;
+    /** Set both feedback low-pass filters from the Delay LPF parameter. */
+    void ApplyToneFilterCutoff();
+
     float m_delaylpFreqMin;
     float m_delaylpFreqMax;
     float m_delaySamplesMin;

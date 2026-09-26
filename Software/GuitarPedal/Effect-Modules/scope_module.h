@@ -25,6 +25,7 @@ class ScopeModule : public BaseEffectModule {
     void ProcessStereo(float inL, float inR) override;
     void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
                 bool isEditing) override;
+    bool UsesKnobMap() const override { return false; }
 
   private:
     float m_scopeBuffer[ScreenWidth];

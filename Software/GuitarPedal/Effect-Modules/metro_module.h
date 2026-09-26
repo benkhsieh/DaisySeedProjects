@@ -74,6 +74,7 @@ class MetroModule : public BaseEffectModule {
     float GetBrightnessForLED(int led_id) const override;
     void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
                 bool isEditing) override;
+    bool UsesKnobMap() const override { return false; }
 
     inline void SetTimeSignature(TimeSignature ts) { m_timeSignature = ts; }
     inline TimeSignature GetTimeSignature() { return m_timeSignature; }

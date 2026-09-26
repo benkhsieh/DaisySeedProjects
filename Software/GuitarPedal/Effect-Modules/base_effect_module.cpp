@@ -1,5 +1,6 @@
 #include "base_effect_module.h"
 #include "../Util/audio_utilities.h"
+#include <cstring>
 
 // This can be used to show the CPU on the default UI
 constexpr bool showCPU = false;
@@ -436,23 +437,16 @@ void BaseEffectModule::UpdateUI(float elapsedTime) {
     // Effect modules are expected to override this fucntion if they have custom UI requiring time based changes.
 }
 
-void BaseEffectModule::DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
-                              bool isEditing) {
-    // By Default, the UI for an Effect Module is no different than it would be for the normal
-    // FullScreenItemMenu. A specific Effect Module is welcome to override this whole function
-    // to take over the full screen. Or overlay additional UI on top of this default UI.
+void BaseEffectModule::SetKnobMapVisible(bool visible) { m_knobMapVisible = visible; }
 
-    // Top Half of Screen is for the Effect Name and arrow indicators
-    int topRowHeight = boundsToDrawIn.GetHeight() / 2;
-    auto topRowRect = boundsToDrawIn.RemoveFromTop(topRowHeight);
-
+void BaseEffectModule::DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect) {
     // Determine if there a page before or after this page
     const bool hasPrev = currentIndex > 0;
     const bool hasNext = currentIndex < numItemsTotal - 1;
 
     // Draw the Arrows before and after
-    auto leftArrowRect = topRowRect.RemoveFromLeft(9).WithSizeKeepingCenter(5, 9).Translated(0, -1);
-    auto rightArrowRect = topRowRect.RemoveFromRight(9).WithSizeKeepingCenter(5, 9).Translated(0, -1);
+    auto leftArrowRect = rowRect.RemoveFromLeft(9).WithSizeKeepingCenter(5, 9).Translated(0, -1);
+    auto rightArrowRect = rowRect.RemoveFromRight(9).WithSizeKeepingCenter(5, 9).Translated(0, -1);
 
     if (hasPrev) {
         for (int16_t x = leftArrowRect.GetRight() - 1; x >= leftArrowRect.GetX(); x--) {
@@ -473,6 +467,62 @@ void BaseEffectModule::DrawUI(OneBitGraphicsDisplay &display, int currentIndex, 
                 break;
         }
     }
+}
+
+void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn) {
+    // Title row: the effect name (its class, e.g. "Delay") with the usual page arrows.
+    const int titleRowHeight = 12;
+    auto titleRect = boundsToDrawIn.RemoveFromTop(titleRowHeight);
+    DrawPageArrows(display, currentIndex, numItemsTotal, titleRect);
+    display.WriteStringAligned(m_name, Font_7x10, titleRect, Alignment::centered, true);
+
+    // Separator under the title
+    display.DrawLine(boundsToDrawIn.GetX(), boundsToDrawIn.GetY(), boundsToDrawIn.GetRight() - 1, boundsToDrawIn.GetY(), true);
+    boundsToDrawIn = boundsToDrawIn.RemoveFromBottom(boundsToDrawIn.GetHeight() - 2);
+
+    // 2 rows x 3 columns, in the order the knobs sit on the 125B panel:
+    // knob 0 top-left, 2 top-right, 3 bottom-left, 5 bottom-right.
+    const int columns = 3;
+    const int rows = 2;
+    const int cellWidth = boundsToDrawIn.GetWidth() / columns;
+    const int cellHeight = boundsToDrawIn.GetHeight() / rows;
+    const int maxLabelChars = 8; // Font_5x8: 8 chars = 40 px inside a 42 px cell
+
+    for (int knob = 0; knob < columns * rows; knob++) {
+        const int col = knob % columns;
+        const int row = knob / columns;
+        Rectangle cell(boundsToDrawIn.GetX() + col * cellWidth, boundsToDrawIn.GetY() + row * cellHeight, cellWidth, cellHeight);
+
+        char label[maxLabelChars + 1];
+        const int paramID = GetMappedParameterIDForKnob(knob);
+        if (paramID == -1) {
+            strncpy(label, "-", sizeof(label));
+        } else {
+            strncpy(label, GetParameterName(paramID), maxLabelChars);
+        }
+        label[maxLabelChars] = '\0';
+
+        display.WriteStringAligned(label, Font_5x8, cell, Alignment::centered, true);
+    }
+}
+
+void BaseEffectModule::DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
+                              bool isEditing) {
+    // By Default, the UI for an Effect Module is no different than it would be for the normal
+    // FullScreenItemMenu. A specific Effect Module is welcome to override this whole function
+    // to take over the full screen. Or overlay additional UI on top of this default UI.
+
+    // Once the knobs have been idle for a while, show what each knob does instead.
+    if (m_knobMapVisible && UsesKnobMap()) {
+        DrawKnobMap(display, currentIndex, numItemsTotal, boundsToDrawIn);
+        return;
+    }
+
+    // Top Half of Screen is for the Effect Name and arrow indicators
+    int topRowHeight = boundsToDrawIn.GetHeight() / 2;
+    auto topRowRect = boundsToDrawIn.RemoveFromTop(topRowHeight);
+
+    DrawPageArrows(display, currentIndex, numItemsTotal, topRowRect);
 
     display.WriteStringAligned(m_name, Font_11x18, topRowRect, Alignment::centered, true);
     display.WriteStringAligned("...", Font_11x18, boundsToDrawIn, Alignment::centered, true);

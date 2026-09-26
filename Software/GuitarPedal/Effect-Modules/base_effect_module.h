@@ -280,6 +280,14 @@ class BaseEffectModule {
      */
     virtual void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn, bool isEditing);
 
+    /** Tells the module whether the knob map should replace the default screen.
+     *  Set by the UI each frame from its knob idle timer. */
+    void SetKnobMapVisible(bool visible);
+
+    /** Modules that overlay their own graphics on the default screen return false so the
+     *  knob map never draws underneath them. Default true. */
+    virtual bool UsesKnobMap() const { return true; }
+
     /** Gets the minimum value for the parameter
         \param parameter_id Id of the parameter to set (0 .. m_paramCount - 1).
         \return int value for minimum parameter value.
@@ -345,6 +353,16 @@ class BaseEffectModule {
     uint32_t m_settingsArrayStartIdx;         // Start index of settings persistent storage struct
   private:
     bool m_isEnabled;
+    bool m_knobMapVisible = false;
+
+    /** Draws the previous/next page arrows into the left and right edges of rowRect and
+     *  shrinks rowRect to the space between them. Shared by DrawUI and DrawKnobMap. */
+    void DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect);
+
+    /** The knob map screen: title row with the effect name, then a 2x3 grid of the
+     *  parameter names mapped to knobs 0..5 in panel order. */
+    void DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn);
+
     float m_sampleRate; // Current Sample Rate this Effect was initialized for.
     float m_cpuUsage;   // CPU usage of the audio callback, can be used for rendering to display
 };

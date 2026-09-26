@@ -21,6 +21,10 @@ jobs:
         with:
           release: "10.3-2021.10"
 
+      - name: Run host unit tests
+        working-directory: Software/GuitarPedal/
+        run: make -C tests
+
       - name: Build Libraries
         working-directory: Software/GuitarPedal/
         run: ./ci/build_libs.sh

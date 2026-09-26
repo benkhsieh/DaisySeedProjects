@@ -747,7 +747,8 @@ int main(void) {
     crossFaderLeft.SetPos(1.0f);
     crossFaderRight.SetPos(1.0f);
 
-    // A hang or hard fault now becomes a 2-second reboot instead of a frozen pedal.
+    // A hang now becomes a 2-second reboot instead of a frozen pedal. (Hard faults reset
+    // immediately from the crash handler.)
     if (kEnableWatchdog) {
         WatchdogStart(kWatchdogTimeoutSeconds);
     }

@@ -1,5 +1,5 @@
-// Hard fault handler that leaves a CrashRecord in backup SRAM and then waits for the
-// independent watchdog to reboot the pedal.
+// Hard fault handler that leaves a CrashRecord in backup SRAM and then resets the MCU
+// (or, with a debugger attached, halts in place so the fault can be inspected).
 //
 // libDaisy defines its own HardFault_Handler (a debugger-only stub), and its startup
 // file holds a weak copy in the same object as the vector table, so ours cannot replace
@@ -29,15 +29,22 @@ void CrashHardFaultHandlerC(uint32_t *stackFrame) {
     const uint32_t stackedPc = stackFrame[6];
     bkshepherd::CrashRecordFill(bkshepherd::g_crashRecord, stackedPc, stackedLr, SCB->CFSR, activeEffectID, daisy::System::GetNow());
 
-    // Backup SRAM may be cacheable depending on MPU setup; push the record out so it is
-    // really in memory before the watchdog resets the core.
+    // libDaisy's MPU setup (region 2) makes backup SRAM non-cacheable, so the record is
+    // already in memory. The clean is belt-and-braces in case that setup ever changes.
     SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t *>(&bkshepherd::g_crashRecord), sizeof(bkshepherd::CrashRecord));
     __DSB();
 
-    // Do not try to recover. The watchdog started in main() resets the MCU within its
-    // timeout, and the next boot reports the record.
-    while (true) {
+    // With a debugger attached, stop here so the fault can be inspected.
+    if (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) {
+        while (true) {
+        }
     }
+
+    // Otherwise reset now. Waiting for the watchdog is not enough: it may not be running
+    // yet (a fault before WatchdogStart would hang forever), and a fault in the audio
+    // interrupt would leave the SAI DMA replaying the last buffer as a buzz until it
+    // fired. The next boot reports the record.
+    NVIC_SystemReset();
 }
 
 // Naked so the stack pointer we inspect is the one the fault pushed onto.

@@ -77,7 +77,9 @@ uint32_t last_save_time; // Time we last set it
 
 // Used to debounce quick switching to/from the tuner
 bool ignoreBypassSwitchUntilNextActuation = false;
-bool effectActiveBeforeQuickSwitch = false;
+
+// Effect on/off state to restore when leaving the tuner. Owned by SetActiveEffect.
+bool effectOnBeforeTuner = true;
 
 // Time we last changed effect
 uint32_t last_effect_change_time;
@@ -209,24 +211,14 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
             // If we have a screen and there is a tuner module, we quick switch
             // to it, otherwise we just cycle through the effects
             if (hardware.SupportsDisplay() && tunerModuleIndex > 0) {
-                // Start the quick switch to the tuner
+                // The rising edge of this same press already toggled effectOn. Undo that
+                // so SetActiveEffect saves and restores the state the player actually had.
+                effectOn = !effectOn;
+
                 if (activeEffectID == tunerModuleIndex) {
-                    // Set back the active effect before the quick switch
                     SetActiveEffect(prevActiveEffectID);
-
-                    // Restore the effect state from when we quick switched, this is an
-                    // inverse because the act of holding the switch caused the state to
-                    // chnage due to the rising edge being detected
-                    effectOn = !effectActiveBeforeQuickSwitch;
-                    activeEffect->SetEnabled(effectOn);
                 } else {
-                    // Store if effect is on or not when quick switching
-                    effectActiveBeforeQuickSwitch = effectOn;
-
-                    // Switch to tuner and force it to be enabled
                     SetActiveEffect(tunerModuleIndex);
-                    effectOn = true;
-                    activeEffect->SetEnabled(effectOn);
                 }
                 ignoreBypassSwitchUntilNextActuation = true;
             } else {
@@ -242,10 +234,9 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
                     newActiveEffectId = 0;
                 }
 
-                SetActiveEffect(newActiveEffectId);
-
+                // Cycling on a screenless pedal lands on the new effect bypassed.
                 effectOn = false;
-                activeEffect->SetEnabled(effectOn);
+                SetActiveEffect(newActiveEffectId);
 
                 ignoreBypassSwitchUntilNextActuation = true;
             }
@@ -450,26 +441,44 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
 }
 
 void SetActiveEffect(int effectID) {
-    if (effectID >= 0 && effectID < availableEffectsCount) {
-        // Store the last used effect
-        prevActiveEffectID = activeEffectID;
-
-        // Update the ID cache
-        activeEffectID = effectID;
-
-        // Update the Active Effect directly.
-        activeEffect = availableEffects[effectID];
-
-        guitarPedalUI.UpdateActiveEffect(effectID);
-
-        // Get a handle to the persitance storage settings
-        Settings &settings = storage.GetSettings();
-
-        // Update the persistant storage setting
-        settings.globalActiveEffectID = effectID;
-
-        last_effect_change_time = System::GetNow();
+    if (effectID < 0 || effectID >= availableEffectsCount || effectID == activeEffectID) {
+        return;
     }
+
+    const bool leavingTuner = (activeEffectID == tunerModuleIndex);
+    const bool enteringTuner = (effectID == tunerModuleIndex);
+
+    // The outgoing module is no longer driven, so it must not report itself as enabled
+    // (its LED brightness and, for some modules, its processing depend on this flag).
+    if (activeEffect != nullptr) {
+        activeEffect->SetEnabled(false);
+    }
+
+    // The tuner is only useful when it is processing audio, so it is always forced on.
+    // Remember the state we came from so leaving the tuner restores it, whichever route
+    // was used to get here (footswitch hold, menu, encoder, MIDI program change).
+    if (enteringTuner && !leavingTuner) {
+        effectOnBeforeTuner = effectOn;
+        effectOn = true;
+    } else if (leavingTuner && !enteringTuner) {
+        effectOn = effectOnBeforeTuner;
+    }
+
+    prevActiveEffectID = activeEffectID;
+    activeEffectID = effectID;
+    activeEffect = availableEffects[effectID];
+
+    // The incoming module takes over the current on/off state. Without this the LED
+    // for a module reached through the menu or encoder stayed dark until bypass was
+    // toggled twice.
+    activeEffect->SetEnabled(effectOn);
+
+    guitarPedalUI.UpdateActiveEffect(effectID);
+
+    Settings &settings = storage.GetSettings();
+    settings.globalActiveEffectID = effectID;
+
+    last_effect_change_time = System::GetNow();
 }
 
 // Typical Switch case for Message Type.
@@ -593,10 +602,11 @@ int main(void) {
     // Load all the effect specific settings
     LoadEffectSettingsFromPersistantStorage();
 
-    // Set the active effect
-    activeEffect = availableEffects[settings.globalActiveEffectID];
-    activeEffectID = settings.globalActiveEffectID;
-    activeEffect->SetEnabled(effectOn);
+    // Set the active effect. activeEffectID starts at 0, so force the assignment for
+    // effect 0 explicitly; SetActiveEffect would treat it as a no-op.
+    activeEffectID = -1;
+    activeEffect = nullptr;
+    SetActiveEffect(settings.globalActiveEffectID);
 
     // Init the Menu UI System
     if (hardware.SupportsDisplay()) {

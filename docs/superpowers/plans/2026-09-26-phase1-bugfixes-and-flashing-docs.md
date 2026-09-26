@@ -29,14 +29,13 @@ Spec: `docs/superpowers/specs/2026-09-26-firmware-next-design.md`, sections 2, 7
 |---|---|
 | `Software/GuitarPedal/Util/audio_guard.h` | New. Header-only, no Daisy includes. Clamp input samples, detect and replace non-finite output samples. |
 | `Software/GuitarPedal/Util/crash_record.h` | New. Header-only, no Daisy includes. `CrashRecord` struct layout, magic, checksum, validity check. |
-| `Software/GuitarPedal/Util/crash_handler.cpp` | New. Defines `HardFault_Handler` (overrides libDaisy's weak default), writes a `CrashRecord` into backup SRAM, then spins until the watchdog reboots. |
+| `Software/GuitarPedal/Util/crash_handler.cpp` | New. Our hard fault handler plus `InstallCrashHandler()`, which patches the live vector table at runtime (libDaisy's own handler cannot be overridden at link time). Writes a `CrashRecord` into backup SRAM, then spins until the watchdog reboots. |
 | `Software/GuitarPedal/Util/watchdog.h` | New. Thin wrapper over the STM32 HAL IWDG: `WatchdogStart(seconds)`, `WatchdogKick()`. |
 | `Software/GuitarPedal/Effect-Modules/base_effect_module.h` / `.cpp` | Modify. Add `virtual void Reset()` (default no-op) so the crash guard can clear an effect's internal state. Add the knob map: `SetKnobMapVisible`, `UsesKnobMap`, `DrawKnobMap`, and a shared `DrawPageArrows` helper. |
 | `Software/GuitarPedal/Effect-Modules/{autopan,chopper,metro,looper,scope,pitch_shifter}_module.h` | Modify. Override `UsesKnobMap()` to return false because they overlay their own graphics. |
 | `Software/GuitarPedal/UI/guitar_pedal_ui.h` / `.cpp` | Modify. Knob idle timer that tells the active effect when to show the map. |
 | `Software/GuitarPedal/Effect-Modules/delay_module.h` / `.cpp` | Modify. Override `Reset()` to clear the delay lines. |
 | `Software/GuitarPedal/guitar_pedal.cpp` | Modify. `SetActiveEffect` owns enable state and tuner on/off state; audio callback uses the guard; main loop kicks the watchdog and handles guard recovery; startup reports the last crash. |
-| `Software/GuitarPedal/Makefile` | Modify. Add `Util/crash_handler.cpp` to `CPP_SOURCES`. |
 | `Software/GuitarPedal/tests/Makefile` | New. Host build of the unit tests with Apple clang. |
 | `Software/GuitarPedal/tests/test_audio_guard.cpp` | New. Unit tests for `audio_guard.h`. |
 | `Software/GuitarPedal/tests/test_crash_record.cpp` | New. Unit tests for `crash_record.h`. |
@@ -935,26 +934,35 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ### Task 6: Hard fault handler writes the record; startup reports it
 
-Spec section 2.3 diagnostics. libDaisy defines `HardFault_Handler` as a weak alias of `Default_Handler` in `dependencies/libDaisy/core/startup_stm32h750xx.c:1208`, so a strong definition in our sources replaces it. Backup SRAM at `0x38800000` survives resets while power is applied; libDaisy's linker script provides a `.backup_sram` section, and `System::InitBackupSram()` enables the domain. Nothing in libDaisy calls `InitBackupSram()` for us, so `main` must.
+Spec section 2.3 diagnostics. Two facts shape this task, both verified on 2026-09-26:
+
+1. libDaisy already defines a strong `HardFault_Handler` in `dependencies/libDaisy/src/sys/system.cpp:125` (a debugger-only stub that executes `BKPT`), and its startup file also carries a weak definition in the same object as the vector table. A strong definition of ours fails to link with "multiple definition", and a linker `--wrap` cannot intercept a reference resolved inside its own object. So the handler is installed at runtime: this app type (`BOOT_SRAM`) runs from AXI SRAM, so the live vector table pointed to by `SCB->VTOR` is writable, and we overwrite its hard-fault slot (index 3) with our handler's address.
+2. `hardware.seed.StartLog()` pulls in the USB CDC stack and costs about 12 KB of DTCM, overflowing the region. The crash report therefore goes to the OLED (when the variant has one) and the LEDs, never USB serial.
+
+Backup SRAM at `0x38800000` survives resets while power is applied; libDaisy's linker script provides a `.backup_sram` NOLOAD section (the current memory report shows 12 B in use there by libDaisy's boot info), and `System::InitBackupSram()` enables the domain. Nothing calls it for us, so `main` must.
 
 **Files:**
-- Create: `Software/GuitarPedal/Util/crash_handler.cpp`
-- Modify: `Software/GuitarPedal/Makefile` (`CPP_SOURCES`)
+- Create: `Software/GuitarPedal/Util/crash_handler.cpp` (the Makefile's `$(wildcard Util/*.cpp)` picks it up; no Makefile change)
 - Modify: `Software/GuitarPedal/guitar_pedal.cpp` (`main`)
 
 **Interfaces:**
 - Consumes: `CrashRecord`, `CrashRecordFill`, `CrashRecordIsValid`, `CrashRecordClear` (Task 5); `activeEffectID` global; `daisy::System::GetNow()`.
 - Produces:
   - `extern bkshepherd::CrashRecord g_crashRecord;` placed in `.backup_sram`.
-  - `extern "C" void HardFault_Handler(void)` strong definition.
-  - Startup behavior: if `g_crashRecord` is valid, print one line over USB serial and blink both LEDs five times, then clear the record.
+  - `void bkshepherd::InstallCrashHandler()`: writes our handler into the live vector table's hard-fault slot. Safe no-op if the table is in internal flash.
+  - Startup behavior: if `g_crashRecord` is valid, show it on the OLED for 2 seconds (if the hardware has a display) and blink both LEDs five times, then clear the record.
 
-- [ ] **Step 1: Write the handler**
+- [ ] **Step 1: Write the handler and installer**
 
 Create `Software/GuitarPedal/Util/crash_handler.cpp`:
 ```cpp
 // Hard fault handler that leaves a CrashRecord in backup SRAM and then waits for the
-// independent watchdog to reboot the pedal. Overrides libDaisy's weak default handler.
+// independent watchdog to reboot the pedal.
+//
+// libDaisy defines its own HardFault_Handler (a debugger-only stub), and its startup
+// file holds a weak copy in the same object as the vector table, so ours cannot replace
+// it at link time. Instead InstallCrashHandler() patches the live vector table, which is
+// writable because BOOT_SRAM apps run from AXI SRAM.
 
 #include "crash_record.h"
 
@@ -971,42 +979,54 @@ extern "C" {
 
 // Called from the naked handler below with a pointer to the exception stack frame.
 // Frame layout: r0, r1, r2, r3, r12, lr, pc, xpsr.
-void HardFault_HandlerC(uint32_t *stackFrame) {
+void CrashHardFaultHandlerC(uint32_t *stackFrame) {
     const uint32_t stackedLr = stackFrame[5];
     const uint32_t stackedPc = stackFrame[6];
     bkshepherd::CrashRecordFill(bkshepherd::g_crashRecord, stackedPc, stackedLr, SCB->CFSR, activeEffectID,
                                 daisy::System::GetNow());
 
-    // Do not try to recover. The watchdog started in main() will reset the MCU within
-    // its timeout, and the next boot reports the record.
+    // Do not try to recover. The watchdog started in main() resets the MCU within its
+    // timeout, and the next boot reports the record.
     while (true) {
     }
 }
 
 // Naked so the stack pointer we inspect is the one the fault pushed onto.
-__attribute__((naked)) void HardFault_Handler(void) {
-    __asm volatile("tst lr, #4        \n"
-                   "ite eq            \n"
-                   "mrseq r0, msp     \n"
-                   "mrsne r0, psp     \n"
-                   "b HardFault_HandlerC \n");
+__attribute__((naked)) void CrashHardFaultHandler(void) {
+    __asm volatile("tst lr, #4              \n"
+                   "ite eq                  \n"
+                   "mrseq r0, msp           \n"
+                   "mrsne r0, psp           \n"
+                   "b CrashHardFaultHandlerC \n");
 }
 }
-```
 
-- [ ] **Step 2: Add it to the build**
+namespace bkshepherd {
 
-In `Software/GuitarPedal/Makefile`, find the line:
-```make
-CPP_SOURCES += Effect-Modules/tuner_module.cpp
-```
-Directly after it add:
-```make
-CPP_SOURCES += Util/crash_handler.cpp
-```
-(Check the existing `Util/` entries in `CPP_SOURCES` first; if there is a `Util` block, put the line there instead.)
+void InstallCrashHandler() {
+    const uint32_t vectorTableAddress = SCB->VTOR;
 
-- [ ] **Step 3: Enable backup SRAM and report at startup**
+    // A table in internal flash (non-bootloader builds) cannot be patched; leave libDaisy's.
+    if (vectorTableAddress >= 0x08000000u && vectorTableAddress < 0x08200000u) {
+        return;
+    }
+
+    // Cortex-M vector table: [0] initial SP, [1] Reset, [2] NMI, [3] HardFault.
+    constexpr uint32_t kHardFaultSlot = 3;
+    volatile uint32_t *vectors = reinterpret_cast<volatile uint32_t *>(vectorTableAddress);
+    vectors[kHardFaultSlot] = reinterpret_cast<uint32_t>(&CrashHardFaultHandler);
+
+    // The table lives in cacheable RAM; push the write out so the core fetches the new entry.
+    SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t *>(vectorTableAddress), 32);
+    __DSB();
+    __ISB();
+}
+
+} // namespace bkshepherd
+```
+`SCB`, `SCB_CleanDCache_by_Addr`, `__DSB`, and `__ISB` come from CMSIS via `daisy_seed.h`.
+
+- [ ] **Step 2: Enable backup SRAM, install the handler, and report at startup**
 
 In `guitar_pedal.cpp`, after the includes add:
 ```cpp
@@ -1014,44 +1034,68 @@ In `guitar_pedal.cpp`, after the includes add:
 
 namespace bkshepherd {
 extern CrashRecord g_crashRecord;
-}
+void InstallCrashHandler();
+} // namespace bkshepherd
 ```
 In `main()`, directly after `hardware.Init(blockSize, boost);` add:
 ```cpp
     // Backup SRAM holds the last crash record across reboots. Enable it before reading.
     System::InitBackupSram();
 
-    // Report a crash from the previous run: one line over USB serial and five fast
-    // blinks of both LEDs, then clear the record so it is reported only once.
+    // Route hard faults to our handler so the next boot can say what crashed.
+    InstallCrashHandler();
+
+    // Report a crash from the previous run: the record on the screen for two seconds and
+    // five fast blinks of both LEDs, then clear it so it is reported only once.
     if (CrashRecordIsValid(g_crashRecord)) {
-        hardware.seed.StartLog(false);
-        hardware.seed.PrintLine("CRASH pc=0x%08lx lr=0x%08lx cfsr=0x%08lx effect=%ld uptime=%lums",
-                                (unsigned long)g_crashRecord.pc, (unsigned long)g_crashRecord.lr,
-                                (unsigned long)g_crashRecord.cfsr, (long)g_crashRecord.effectID,
-                                (unsigned long)g_crashRecord.uptimeMs);
+        if (hardware.SupportsDisplay()) {
+            char line[32];
+            hardware.display.Fill(false);
+            hardware.display.SetCursor(0, 0);
+            hardware.display.WriteString("CRASH last run", Font_7x10, true);
+            hardware.display.SetCursor(0, 14);
+            snprintf(line, sizeof(line), "pc %08lx", (unsigned long)g_crashRecord.pc);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 26);
+            snprintf(line, sizeof(line), "lr %08lx", (unsigned long)g_crashRecord.lr);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 38);
+            snprintf(line, sizeof(line), "cfsr %08lx", (unsigned long)g_crashRecord.cfsr);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 50);
+            snprintf(line, sizeof(line), "fx %ld  %lus", (long)g_crashRecord.effectID,
+                     (unsigned long)(g_crashRecord.uptimeMs / 1000u));
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.Update();
+        }
         for (int i = 0; i < 5; i++) {
             hardware.SetLed(0, 1.0f);
             hardware.SetLed(1, 1.0f);
             hardware.UpdateLeds();
-            System::Delay(80);
+            System::Delay(200);
             hardware.SetLed(0, 0.0f);
             hardware.SetLed(1, 0.0f);
             hardware.UpdateLeds();
-            System::Delay(80);
+            System::Delay(200);
         }
         CrashRecordClear(g_crashRecord);
     }
 ```
+The five blinks take 2 seconds, which is how long the screen stays up before the normal UI takes over. Confirm `<cstdio>` (for `snprintf`) is available; `guitar_pedal.cpp` already uses `sprintf`, so it is.
 
-- [ ] **Step 4: Build all variants**
+- [ ] **Step 3: Build all variants**
 
 Run:
 ```bash
-cd ~/DaisySeedProjects/.worktrees/next/Software/GuitarPedal && ./ci/format.sh && for v in 125B 1590B 1590B_SMD TERRARIUM FUNBOX; do make clean >/dev/null && make -j8 VARIANT=$v 2>&1 | grep -E "warning|error|SRAM:"; done
+cd ~/DaisySeedProjects/.worktrees/next/Software/GuitarPedal && clang-format -i Util/crash_handler.cpp guitar_pedal.cpp && for v in 125B 1590B 1590B_SMD TERRARIUM FUNBOX; do make clean >/dev/null && make -j8 VARIANT=$v 2>&1 | grep -E "warning|error|DTCMRAM:|SRAM:"; done
 ```
-Expected: five `SRAM:` lines, no warnings or errors. If the linker complains about `.backup_sram`, confirm the app is built with `APP_TYPE = BOOT_SRAM` (the sram linker script has the section; the internal-flash script may not).
+Expected: five builds, no warnings or errors from project sources. For the 125B: `BACKUP_SRAM` shows 40 B (12 B libDaisy boot info plus the 28-byte record), DTCMRAM unchanged from 119908 B (backup SRAM and code do not count against it). Then confirm the handler is linked and the record is in backup SRAM:
+```bash
+arm-none-eabi-nm build/guitarpedal.elf | grep -E "CrashHardFaultHandler|g_crashRecord|InstallCrashHandler"
+```
+Expected: `g_crashRecord` at an address starting `38800`, and both handler symbols present.
 
-- [ ] **Step 5: Hardware check with a forced fault**
+- [ ] **Step 4: Hardware check with a forced fault (run at Task 10 time, with the watchdog in)**
 
 Temporarily add to the top of the `while (1)` loop in `main()`:
 ```cpp
@@ -1060,18 +1104,13 @@ Temporarily add to the top of the `while (1)` loop in `main()`:
             *bad = 1; // deliberate bus fault -> hard fault
         }
 ```
-Build, flash, hold Alt for 5 seconds. The pedal freezes (the watchdog is not in yet; that is Task 7). Power cycle. Expected: both LEDs blink five times at startup, then normal operation. Connect the pedal's USB to the Mac and open a serial terminal within a second of power-up if you want the text line:
-```bash
-ls /dev/tty.usbmodem*
-screen /dev/tty.usbmodem* 115200
-```
-Remove the temporary block before committing and confirm with `git diff` that only the intended changes remain.
+Build, flash, hold Alt for 5 seconds. With the watchdog from Task 7 the pedal reboots within 2 seconds. Expected on reboot: the screen shows `CRASH last run` with a `pc` in the `24xxxxxx` range and `fx` equal to the effect that was active, both LEDs blink five times, then normal operation. Power-cycle and confirm the report does not repeat. Remove the temporary block before committing anything else and confirm with `git diff`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-cd ~/DaisySeedProjects/.worktrees/next && git add Software/GuitarPedal/Util/crash_handler.cpp Software/GuitarPedal/Makefile Software/GuitarPedal/guitar_pedal.cpp
-git commit -m "Record hard faults in backup SRAM and report them at next boot
+cd ~/DaisySeedProjects/.worktrees/next && git add Software/GuitarPedal/Util/crash_handler.cpp Software/GuitarPedal/guitar_pedal.cpp
+git commit -m "Record hard faults in backup SRAM and report them on screen at next boot
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -1175,7 +1214,7 @@ Expected: five `SRAM:` lines, no warnings or errors. If `IWDG1` or `IWDG_PRESCAL
 
 - [ ] **Step 4: Hardware check: fault now self-recovers**
 
-Re-add the temporary forced-fault block from Task 6 Step 5, build, flash, hold Alt for 5 seconds. Expected: the pedal goes silent, and within about 2 seconds reboots on its own, both LEDs blink five times, and normal operation resumes without a power cycle. Remove the temporary block and confirm with `git diff`.
+Add the temporary forced-fault block from Task 6 Step 4, build, flash, hold Alt for 5 seconds. Expected: the pedal goes silent, within about 2 seconds reboots on its own, shows `CRASH last run` on the screen, both LEDs blink five times, and normal operation resumes without a power cycle. Remove the temporary block and confirm with `git diff`.
 
 Also confirm the watchdog does not fire in normal use: leave the pedal running for 10 minutes while playing, switching effects, and opening every menu including Preset > Erase All. It must never reboot (no five-blink pattern, no gap in audio).
 
@@ -1667,7 +1706,7 @@ Implements sections 2 and 7 (flashing guides) of docs/superpowers/specs/2026-09-
 
 - SetActiveEffect now owns enable state and tuner on/off state, fixing the tuner receiving no audio when reached via menu/encoder/MIDI, and LEDs going dark after switching effects.
 - Audio guard: input clamp, non-finite output sanitizer, BaseEffectModule::Reset() hook (Delay clears its lines).
-- Hard fault handler records pc/lr/cfsr/effect in backup SRAM; next boot blinks and prints it.
+- Hard fault handler (installed at runtime into the vector table) records pc/lr/cfsr/effect in backup SRAM; next boot shows it on the OLED and blinks.
 - Independent watchdog, 2 s.
 - Knob map screen after 3 s of knob inactivity (spec section 11).
 - docs/FLASHING-MAC.md and docs/FLASHING-WINDOWS.md.

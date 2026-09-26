@@ -48,7 +48,7 @@ Mitigations, all three:
 
 Steve's recollection is that a feedback or pitch-shift effect such as the Delay was active. That matches the first mechanism, so the crash-guard test in section 8 targets Delay at maximum feedback and Pitch at an octave.
 
-Diagnostics for the next crash: enable the hard-fault handler to flash both LEDs in a distinctive pattern and record the faulting address in a no-init RAM word that is printed over USB serial at next boot.
+Diagnostics for the next crash: install our own hard-fault handler at runtime (libDaisy's is a debugger-only stub and cannot be overridden at link time), record the faulting address, fault status, active effect, and uptime in backup SRAM, and on the next boot show that record on the OLED for two seconds and blink both LEDs five times. USB serial logging was ruled out: enabling it costs about 12 KB of DTCM, which the build does not have.
 
 ## 3. Footswitch gesture state machine
 

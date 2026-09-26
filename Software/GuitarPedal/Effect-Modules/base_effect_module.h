@@ -342,6 +342,16 @@ class BaseEffectModule {
 
     float GetSampleRate() const { return m_sampleRate; }
 
+    /** Draws the previous/next page arrows into the left and right edges of rowRect and
+     *  shrinks rowRect to the space between them. Shared by DrawUI and DrawKnobMap. */
+    void DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect);
+
+    /** The knob map screen: title row with the effect name, then a 2x3 grid of the
+     *  parameter names mapped to knobs 0..5 in panel order. */
+    void DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn);
+
+    bool m_knobMapVisible = false;
+
     const char *m_name;                       // Name of the Effect
     int m_paramCount;                         // Number of Effect Parameters
     int m_presetCount;                        // Number of Stored Presets
@@ -353,16 +363,6 @@ class BaseEffectModule {
     uint32_t m_settingsArrayStartIdx;         // Start index of settings persistent storage struct
   private:
     bool m_isEnabled;
-    bool m_knobMapVisible = false;
-
-    /** Draws the previous/next page arrows into the left and right edges of rowRect and
-     *  shrinks rowRect to the space between them. Shared by DrawUI and DrawKnobMap. */
-    void DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect);
-
-    /** The knob map screen: title row with the effect name, then a 2x3 grid of the
-     *  parameter names mapped to knobs 0..5 in panel order. */
-    void DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn);
-
     float m_sampleRate; // Current Sample Rate this Effect was initialized for.
     float m_cpuUsage;   // CPU usage of the audio callback, can be used for rendering to display
 };

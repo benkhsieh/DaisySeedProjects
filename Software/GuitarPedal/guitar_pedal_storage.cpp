@@ -1,5 +1,6 @@
 #include "guitar_pedal_storage.h"
 #include "Effect-Modules/base_effect_module.h"
+#include "Util/watchdog.h"
 
 using namespace bkshepherd;
 
@@ -287,4 +288,9 @@ void SetSettingsParameterValueForEffect(int effectID, int paramID, uint32_t para
     settings.globalEffectsSettings[startIdx + paramID] = paramValue;
 }
 
-void FactoryReset(void *context) { storage.RestoreDefaults(); }
+void FactoryReset(void *context) {
+    // Restoring defaults erases and rewrites QSPI flash; start with a full watchdog window.
+    // (A no-op if the watchdog was never started.)
+    bkshepherd::WatchdogKick();
+    storage.RestoreDefaults();
+}

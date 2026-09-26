@@ -2,6 +2,8 @@
 #include "../Hardware-Modules/base_hardware_module.h"
 #include "../guitar_pedal_storage.h"
 
+#include <algorithm>
+
 using namespace bkshepherd;
 
 // Seconds of no knob-driven parameter changes before the knob map replaces the effect
@@ -382,7 +384,8 @@ void GuitarPedalUI::UpdateUI(float elapsedTime) {
     activeEffect->UpdateUI(elapsedTime);
 
     // Knob map: show it once the knobs have been idle long enough.
-    m_secondsSinceKnobActivity += elapsedTime;
+    // Capped at the threshold so it cannot grow without bound (and lose float precision).
+    m_secondsSinceKnobActivity = std::min(m_secondsSinceKnobActivity + elapsedTime, kKnobMapIdleSeconds);
     activeEffect->SetKnobMapVisible(m_secondsSinceKnobActivity >= kKnobMapIdleSeconds);
 
     // Properly Handle returning the screen from a parameter change

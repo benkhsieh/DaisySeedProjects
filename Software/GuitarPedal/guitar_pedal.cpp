@@ -515,6 +515,10 @@ void SetActiveEffect(int effectID) {
     activeEffectID = effectID;
     activeEffect = availableEffects[effectID];
 
+    // Do not let a knob map left visible from this module's last turn show for a frame
+    // before the UI recomputes it.
+    activeEffect->SetKnobMapVisible(false);
+
     // The incoming module takes over the current on/off state. Without this the LED
     // for a module reached through the menu or encoder stayed dark until bypass was
     // toggled twice.
@@ -893,6 +897,10 @@ int main(void) {
                 uint16_t tempPreset = activeEffect->GetCurrentPreset();
                 SaveEffectSettingsToPersitantStorageForEffectID(activeEffectID, tempPreset);
                 guitarPedalUI.ShowSavingSettingsScreen();
+            }
+            // Save may erase and rewrite QSPI flash; start with a full watchdog window.
+            if (kEnableWatchdog) {
+                WatchdogKick();
             }
             storage.Save();
             last_save_time = System::GetNow();

@@ -35,7 +35,16 @@ inline void WatchdogStart(float timeoutSeconds) {
     HAL_IWDG_Init(&h);
 }
 
-inline void WatchdogKick() { HAL_IWDG_Refresh(&WatchdogHandle()); }
+/** Reload the watchdog counter. Safe to call before WatchdogStart() (or when the
+ *  watchdog is disabled): the handle is still zeroed then, and HAL_IWDG_Refresh would
+ *  write the reload key through a null Instance to address 0 (ITCM). */
+inline void WatchdogKick() {
+    IWDG_HandleTypeDef &h = WatchdogHandle();
+    if (h.Instance == nullptr) {
+        return;
+    }
+    HAL_IWDG_Refresh(&h);
+}
 
 } // namespace bkshepherd
 

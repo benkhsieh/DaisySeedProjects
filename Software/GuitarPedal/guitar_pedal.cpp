@@ -602,11 +602,16 @@ int main(void) {
     // Load all the effect specific settings
     LoadEffectSettingsFromPersistantStorage();
 
-    // Set the active effect. activeEffectID starts at 0, so force the assignment for
-    // effect 0 explicitly; SetActiveEffect would treat it as a no-op.
-    activeEffectID = -1;
-    activeEffect = nullptr;
-    SetActiveEffect(settings.globalActiveEffectID);
+    // Set the active effect directly. SetActiveEffect cannot be used here because it
+    // refreshes the UI, which is initialized below from the chosen effect. Apply the same
+    // rules it enforces: the tuner is always forced on, and the module takes effectOn.
+    activeEffectID = settings.globalActiveEffectID;
+    activeEffect = availableEffects[activeEffectID];
+    if (activeEffectID == tunerModuleIndex) {
+        effectOnBeforeTuner = effectOn;
+        effectOn = true;
+    }
+    activeEffect->SetEnabled(effectOn);
 
     // Init the Menu UI System
     if (hardware.SupportsDisplay()) {

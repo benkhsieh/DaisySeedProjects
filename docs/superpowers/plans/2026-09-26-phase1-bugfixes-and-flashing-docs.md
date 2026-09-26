@@ -470,7 +470,9 @@ Replace with:
                 ignoreBypassSwitchUntilNextActuation = true;
 ```
 
-- [ ] **Step 4: Make startup go through the same enable path**
+- [ ] **Step 4: Startup applies the same enable and tuner rules without calling SetActiveEffect**
+
+`SetActiveEffect` refreshes the UI, and the UI is not initialized until after the active effect is chosen (`guitarPedalUI.Init()` builds its menus from `activeEffect`), so startup cannot go through `SetActiveEffect`. It applies the same two rules directly.
 
 In `main()`, find:
 ```cpp
@@ -481,13 +483,17 @@ In `main()`, find:
 ```
 Replace with:
 ```cpp
-    // Set the active effect. activeEffectID starts at 0, so force the assignment for
-    // effect 0 explicitly; SetActiveEffect would treat it as a no-op.
-    activeEffectID = -1;
-    activeEffect = nullptr;
-    SetActiveEffect(settings.globalActiveEffectID);
+    // Set the active effect directly. SetActiveEffect cannot be used here because it
+    // refreshes the UI, which is initialized below from the chosen effect. Apply the same
+    // rules it enforces: the tuner is always forced on, and the module takes effectOn.
+    activeEffectID = settings.globalActiveEffectID;
+    activeEffect = availableEffects[activeEffectID];
+    if (activeEffectID == tunerModuleIndex) {
+        effectOnBeforeTuner = effectOn;
+        effectOn = true;
+    }
+    activeEffect->SetEnabled(effectOn);
 ```
-Note: `SetActiveEffect` calls `guitarPedalUI.UpdateActiveEffect`, which is guarded by `hardware.SupportsDisplay()` and is safe before `guitarPedalUI.Init()` because it only re-initializes menu pages from the active effect. Confirm by reading `UI/guitar_pedal_ui.cpp` `UpdateActiveEffect`; it calls `InitEffectUiPages`, which allocates from `activeEffect` and does not touch the display.
 
 - [ ] **Step 5: Build for 125B and check for warnings**
 

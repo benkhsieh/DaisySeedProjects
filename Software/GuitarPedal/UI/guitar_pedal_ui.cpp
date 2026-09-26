@@ -2,7 +2,14 @@
 #include "../Hardware-Modules/base_hardware_module.h"
 #include "../guitar_pedal_storage.h"
 
+#include <algorithm>
+
 using namespace bkshepherd;
+
+// Seconds of no knob-driven parameter changes before the knob map replaces the effect
+// name screen. The main loop keeps reporting a moving knob for 1 s after it stops, so
+// this lands at roughly 3 s of stillness.
+constexpr float kKnobMapIdleSeconds = 2.0f;
 
 // Globals
 extern BaseHardwareModule hardware;
@@ -31,7 +38,7 @@ void ClearCanvas(const daisy::UiCanvasDescriptor &canvasDescriptor) {
 GuitarPedalUI::GuitarPedalUI()
     : m_needToCloseActiveEffectSettingsMenu(false), m_paramIdToReturnTo(-1), m_numActiveEffectSettingsItems(0),
       m_activePresetSelected(0), m_activePresetSettingIntValue(0, 255, 0, 1, 1), m_midiChannelSettingValue(1, 16, 1, 1, 5),
-      m_displayingSaveSettingsNotification(false), m_secondsSinceLastActiveEffectSettingsSave(0.0f)
+      m_displayingSaveSettingsNotification(false), m_secondsSinceLastActiveEffectSettingsSave(0.0f), m_secondsSinceKnobActivity(0.0f)
 
 {}
 
@@ -49,6 +56,9 @@ void GuitarPedalUI::UpdateActiveEffect(int effectID) {
     if (hardware.SupportsDisplay()) {
         // Update the Menu item for the active effect (important for active effect changes not coming from the menu)
         m_availableEffectListMappedValues->SetIndex(effectID);
+
+        // A fresh effect shows its name first; the knob map follows after the idle time.
+        m_secondsSinceKnobActivity = 0.0f;
 
         // Re-init the UI Pages for the Main Menu and Effect Parameters
         InitEffectUiPages();
@@ -81,6 +91,7 @@ void GuitarPedalUI::UpdateActiveEffectParameterValue(int paramID, bool showChang
         }
 
         if (showChangeOnDisplay) {
+            m_secondsSinceKnobActivity = 0.0f;
             m_secondsTilReturnFromParamChange = 0.5f;
 
             // Change the main menu to be the name of the value the Knob is changing
@@ -371,6 +382,11 @@ void GuitarPedalUI::UpdateUI(float elapsedTime) {
     Settings &settings = storage.GetSettings();
 
     activeEffect->UpdateUI(elapsedTime);
+
+    // Knob map: show it once the knobs have been idle long enough.
+    // Capped at the threshold so it cannot grow without bound (and lose float precision).
+    m_secondsSinceKnobActivity = std::min(m_secondsSinceKnobActivity + elapsedTime, kKnobMapIdleSeconds);
+    activeEffect->SetKnobMapVisible(m_secondsSinceKnobActivity >= kKnobMapIdleSeconds);
 
     // Properly Handle returning the screen from a parameter change
     if (m_secondsTilReturnFromParamChange > 0.0f) {

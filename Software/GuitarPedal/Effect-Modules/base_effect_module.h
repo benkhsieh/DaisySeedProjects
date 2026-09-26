@@ -258,6 +258,14 @@ class BaseEffectModule {
      */
     virtual void SetTempo(uint32_t bpm);
 
+    /** Clears any internal audio state (delay lines, filters, feedback paths) without
+     *  reallocating or touching parameters. Called by the crash guard after the module
+     *  produced non-finite output. The default does nothing; modules with feedback
+     *  memory should override it. Must be safe to call from the main loop while the
+     *  audio callback is running.
+     */
+    virtual void Reset();
+
     /** Handles updating the custom UI for this Effect.
      * @param elapsedTime a float value of how much time (in seconds) has elapsed since the last update
      */
@@ -271,6 +279,14 @@ class BaseEffectModule {
      * @param isEditing         True if the enter button was pressed and the value is being edited directly.
      */
     virtual void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn, bool isEditing);
+
+    /** Tells the module whether the knob map should replace the default screen.
+     *  Set by the UI each frame from its knob idle timer. */
+    void SetKnobMapVisible(bool visible);
+
+    /** Modules that overlay their own graphics on the default screen return false so the
+     *  knob map never draws underneath them. Default true. */
+    virtual bool UsesKnobMap() const { return true; }
 
     /** Gets the minimum value for the parameter
         \param parameter_id Id of the parameter to set (0 .. m_paramCount - 1).
@@ -325,6 +341,16 @@ class BaseEffectModule {
     virtual void ParameterChanged(int parameter_id);
 
     float GetSampleRate() const { return m_sampleRate; }
+
+    /** Draws the previous/next page arrows into the left and right edges of rowRect and
+     *  shrinks rowRect to the space between them. Shared by DrawUI and DrawKnobMap. */
+    void DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect);
+
+    /** The knob map screen: title row with the effect name, then a 2x3 grid of the
+     *  parameter names mapped to knobs 0..5 in panel order. */
+    void DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn);
+
+    bool m_knobMapVisible = false;
 
     const char *m_name;                       // Name of the Effect
     int m_paramCount;                         // Number of Effect Parameters

@@ -26,6 +26,7 @@ class PitchShifterModule : public BaseEffectModule {
     void AlternateFootswitchReleased() override;
     void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
                 bool isEditing) override;
+    bool UsesKnobMap() const override { return false; }
 
   private:
     void SetTranspose(float semitone);

@@ -1,12 +1,14 @@
 #include "delay_module.h"
+#include "../Util/audio_guard.h"
 #include "../Util/audio_utilities.h"
 
 using namespace bkshepherd;
 
-static const char *s_waveBinNames[6] = {"Sine", "Triangle", "Saw", "Ramp",
-                                        "Square", "Tape"}; //, "Poly Tri", "Poly Saw", "Poly Sqr"};  // Horrible loud sound when switching to
-                                                   // poly tri, not every time, TODO whats going on? (I suspect electro smith broke
-                                                   // the poly tri osc, the same happens in the tremolo too)
+static const char *s_waveBinNames[6] = {
+    "Sine", "Triangle", "Saw",
+    "Ramp", "Square",   "Tape"}; //, "Poly Tri", "Poly Saw", "Poly Sqr"};  // Horrible loud sound when switching to
+                                 // poly tri, not every time, TODO whats going on? (I suspect electro smith broke
+                                 // the poly tri osc, the same happens in the tremolo too)
 static const char *s_modParamNames[4] = {"None", "DelayTime", "DelayLevel", "DelayPan"};
 static const char *s_delayModes[3] = {"Normal", "Triplett", "Dotted 8th"};
 static const char *s_delayTypes[6] = {"Forward", "Reverse", "Octave", "ReverseOct", "Dual", "DualOct"};
@@ -141,10 +143,23 @@ DelayModule::~DelayModule() {
     // No Code Needed
 }
 
+float DelayModule::DelayTimeTargetSamples() const {
+    return m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * GetParameterAsFloat(0);
+}
+
+float DelayModule::SpreadTargetSamples() const {
+    return m_delaySpreadMin + (m_delaySpreadMax - m_delaySpreadMin) * GetParameterAsFloat(6);
+}
+
+void DelayModule::ApplyToneFilterCutoff() {
+    const float cutoff = m_delaylpFreqMin + (m_delaylpFreqMax - m_delaylpFreqMin) * GetParameterAsFloat(5);
+    delayLeft.toneOctLP.SetFreq(cutoff);
+    delayRight.toneOctLP.SetFreq(cutoff);
+}
+
 void DelayModule::UpdateLEDRate() {
     // Update the LED oscillator frequency based on the current timeParam
-    float timeParam = GetParameterAsFloat(0);
-    float delaySamples = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam;
+    float delaySamples = DelayTimeTargetSamples();
     float delayFreq = effect_samplerate / delaySamples;
     led_osc.SetFreq(delayFreq / 2.0);
 }
@@ -207,6 +222,44 @@ void DelayModule::Init(float sample_rate) {
     CalculateDelayMix();
 }
 
+void DelayModule::Reset() {
+    // Clear every delay line so a NaN or runaway feedback value cannot recirculate.
+    delayLineLeft.Reset();
+    delayLineRight.Reset();
+    delayLineRevLeft.Reset();
+    delayLineRevRight.Reset();
+    delayLineSpread.Reset();
+
+    // Every delay read passes through the feedback low-pass, which remembers its last
+    // output. Re-init it so a NaN held there is gone, then restore the user's cutoff.
+    delayLeft.toneOctLP.Init(effect_samplerate);
+    delayRight.toneOctLP.Init(effect_samplerate);
+    ApplyToneFilterCutoff();
+
+    // Delay times glide toward their targets with a one-pole filter, which would hold a
+    // NaN forever. Snap them to the target, rebuilding any target that is not finite.
+    // (audio_guard's bit test is used because -Ofast folds std::isfinite to true.)
+    if (!audio_guard::IsFiniteBits(delayLeft.delayTarget)) {
+        delayLeft.delayTarget = DelayTimeTargetSamples();
+    }
+    if (!audio_guard::IsFiniteBits(delayRight.delayTarget)) {
+        delayRight.delayTarget = DelayTimeTargetSamples();
+    }
+    if (!audio_guard::IsFiniteBits(delaySpread.delayTarget)) {
+        delaySpread.delayTarget = SpreadTargetSamples();
+    }
+    delayLeft.currentDelay = delayLeft.delayTarget;
+    delayRight.currentDelay = delayRight.delayTarget;
+    delaySpread.currentDelay = delaySpread.delayTarget;
+
+    // Other recursive per-sample state: the smoothed modulation value (back to its
+    // constructor value), the modulation oscillator phase, and the scratch outputs.
+    m_currentMod = 1.0f;
+    modOsc.Reset();
+    m_pdelRight_out = 0.0f;
+    _level = 1.0f;
+}
+
 void DelayModule::ParameterChanged(int parameter_id) {
     if (parameter_id == 0) { // Delay Time
         UpdateLEDRate();
@@ -229,8 +282,7 @@ void DelayModule::ParameterChanged(int parameter_id) {
             delayRight.secondTapOn = false;
         }
     } else if (parameter_id == 5) {
-        delayLeft.toneOctLP.SetFreq(m_delaylpFreqMin + (m_delaylpFreqMax - m_delaylpFreqMin) * GetParameterAsFloat(5));
-        delayRight.toneOctLP.SetFreq(m_delaylpFreqMin + (m_delaylpFreqMax - m_delaylpFreqMin) * GetParameterAsFloat(5));
+        ApplyToneFilterCutoff();
     }
 }
 
@@ -277,7 +329,7 @@ void DelayModule::ProcessModulation() {
 
         if (waveForm == 5) {
             // Tape flutter mode with dynamic min
-            const float M     = wowDepth + 0.2f * flutterDepth; // Max amplitude of tape modulation.
+            const float M = wowDepth + 0.2f * flutterDepth; // Max amplitude of tape modulation.
             const float depth = 500.0f;
 
             float baseMin = D_min + M * mod_amount * depth;
@@ -286,7 +338,7 @@ void DelayModule::ProcessModulation() {
             float base = baseMin + (baseMax - baseMin) * timeParam;
 
             delayTarget = base + mod * mod_amount * depth;
-        } else {        
+        } else {
             delayTarget = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam + mod * mod_amount * 500;
         }
         if (delayTarget < D_min) {
@@ -296,7 +348,7 @@ void DelayModule::ProcessModulation() {
             delayTarget = MAX_DELAY_NORM - 2;
         }
 
-        delayLeft.delayTarget  = delayTarget;
+        delayLeft.delayTarget = delayTarget;
         delayRight.delayTarget = delayTarget;
     } else if (modParam == 2) {
         float mod_level = mod * mod_amount + (1.0 - mod_amount);
@@ -325,10 +377,9 @@ void DelayModule::ProcessMono(float in) {
     // Calculate the effect
     int delayType = GetParameterAsBinnedValue(4) - 1;
 
-    float timeParam = GetParameterAsFloat(0);
-
-    delayLeft.delayTarget = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam;
-    delayRight.delayTarget = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam;
+    const float delayTimeTarget = DelayTimeTargetSamples();
+    delayLeft.delayTarget = delayTimeTarget;
+    delayRight.delayTarget = delayTimeTarget;
 
     delayLeft.feedback = GetParameterAsFloat(1);
     delayRight.feedback = GetParameterAsFloat(1);
@@ -378,7 +429,7 @@ void DelayModule::ProcessMono(float in) {
     // float delRight_out = delLeft_out;
 
     // Calculate any delay spread
-    delaySpread.delayTarget = m_delaySpreadMin + (m_delaySpreadMax - m_delaySpreadMin) * GetParameterAsFloat(6);
+    delaySpread.delayTarget = SpreadTargetSamples();
     float delSpread_out = delaySpread.Process(delRight_out);
     if (GetParameterRaw(6) > 0 && delayType != 4 && delayType != 5) {
         delRight_out = delSpread_out;
@@ -400,10 +451,9 @@ void DelayModule::ProcessStereo(float inL, float inR) {
     // Calculate the effect
     int delayType = GetParameterAsBinnedValue(4) - 1;
 
-    float timeParam = GetParameterAsFloat(0);
-
-    delayLeft.delayTarget = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam;
-    delayRight.delayTarget = m_delaySamplesMin + (m_delaySamplesMax - m_delaySamplesMin) * timeParam;
+    const float delayTimeTarget = DelayTimeTargetSamples();
+    delayLeft.delayTarget = delayTimeTarget;
+    delayRight.delayTarget = delayTimeTarget;
 
     delayLeft.feedback = GetParameterAsFloat(1);
     delayRight.feedback = GetParameterAsFloat(1);
@@ -453,7 +503,7 @@ void DelayModule::ProcessStereo(float inL, float inR) {
     // float delRight_out = delLeft_out;
 
     // Calculate any delay spread
-    delaySpread.delayTarget = m_delaySpreadMin + (m_delaySpreadMax - m_delaySpreadMin) * GetParameterAsFloat(6);
+    delaySpread.delayTarget = SpreadTargetSamples();
     float delSpread_out = delaySpread.Process(delRight_out);
     if (GetParameterRaw(6) > 0 && delayType != 4 && delayType != 5) {
         delRight_out = delSpread_out;

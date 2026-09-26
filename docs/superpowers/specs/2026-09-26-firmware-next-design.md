@@ -11,6 +11,7 @@ Hardware target: 125B variant (Ben's and Steve's pedals). On this build the righ
 3. Add a two-knob Fender-style tremolo, a dedicated Drop pitch module with a momentary mode, and a Space Echo style tape echo.
 4. Add "effect groups": named subsets of the loaded effects that can be cycled with both footswitches, so a player can lock a set for a gig.
 5. Ship a user manual and step-by-step flashing guides for macOS and Windows in the repo.
+6. Show a knob map on the OLED after a few seconds of knob inactivity: the effect's name as a title and the parameter each of the six knobs controls (section 11).
 
 Out of scope: running two effects at once, improving the pitch-shift algorithm, any ESP32 work.
 
@@ -189,10 +190,11 @@ There is no host build, so testing is on hardware plus CI.
   - Groups: build a group of four, cycle it with Both tap, confirm wrap, confirm knobs do not jump on switch, power cycle and confirm the group survives.
   - AmpTrem, Drop, TapeEcho: knobs, tap tempo on AmpTrem and TapeEcho, Drop Moment mode on Alt hold, TapeEcho self-oscillation on Alt hold, LED behavior. TapeEcho at defaults with all knobs centered-by-default must sound like a rockabilly slapback with no adjustment.
   - IR: Alt cycles and wraps.
+  - Knob map: leave the knobs alone for 3 seconds on Delay; the screen shows "Delay" and six labels in the panel layout. Turn a knob; the parameter pop-up appears and the map returns about 3 seconds after the knob stops. Switch to Tuner; the tuner screen is unaffected. Switch to Looper; its own overlay is shown instead of the map.
 
 ## 9. Sequence
 
-1. Bug fixes (2.1, 2.2, 2.3) and the flashing guides. Flash Steve's pedal with this build first.
+1. Bug fixes (2.1, 2.2, 2.3), the knob map screen (section 11), and the flashing guides. Flash Steve's pedal with this build first.
 2. AmpTrem, Drop, and TapeEcho modules.
 3. Footswitch gesture state machine and Both tap next-effect.
 4. Effect groups and the Groups UI.
@@ -203,3 +205,14 @@ There is no host build, so testing is on hardware plus CI.
 
 1. Bypass is the right footswitch and Alt is the left on Ben's and Steve's 125B builds. The manual uses those words.
 2. The effect active at the crashes is not known. Steve believes it was a feedback or pitch-shift effect such as the Delay. Section 2.3 covers this.
+
+## 11. Knob map screen (added 2026-09-26, Phase 1)
+
+After the knobs have been idle for about 3 seconds, the effect's main screen switches from the large effect name to a knob map: a title row with the effect name (the class of effect, such as "Delay" or "TapeEcho") plus the existing previous/next arrows, and below it a two-by-three grid of parameter names laid out like the six knobs on the 125B panel. Knob 0 is top left, knob 2 top right, knob 3 bottom left, knob 5 bottom right. If that does not match the physical panel, the layout is one table in the base class.
+
+- Labels are per effect. Presets change values, not what a knob does, so the map does not change with the preset.
+- Labels use the parameter name from the effect's metadata, truncated to 8 characters in the 5 by 8 font. A knob with no mapped parameter shows a dash.
+- The map is drawn by `BaseEffectModule::DrawUI`, so every effect gets it without per-module work. Effects that overlay their own graphics on the default screen (AutoPan, Chopper, Metronome, Looper, Scope, Pitch) opt out with a virtual `UsesKnobMap()` returning false and keep their current screen. Effects that take the whole screen (Tuner, GraphicEQ, ParaEQ) are unaffected.
+- Idle detection lives in the UI: any knob-driven parameter change or an effect change restarts the timer. The main loop keeps reporting a knob for 1 second after it stops moving, so the UI timer is set to 2 seconds to land at roughly 3 seconds of stillness.
+- While a knob is moving the existing behavior stands: the parameter name and value pop up for half a second, then the effect screen returns.
+- Cost: no DTCM, a few hundred bytes of code, no per-frame allocation.

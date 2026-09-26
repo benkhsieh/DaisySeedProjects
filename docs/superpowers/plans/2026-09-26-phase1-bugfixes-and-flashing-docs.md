@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a 125B firmware build that fixes the tuner-gets-no-audio bug and the LEDs-dark-after-effect-switch bug, survives non-finite audio and hard faults without freezing, records what crashed, and comes with step-by-step flashing guides for macOS and Windows.
+**Goal:** Ship a 125B firmware build that fixes the tuner-gets-no-audio bug and the LEDs-dark-after-effect-switch bug, survives non-finite audio and hard faults without freezing, records what crashed, shows a knob map on the screen after the knobs go idle, and comes with step-by-step flashing guides for macOS and Windows.
 
 **Architecture:** All runtime changes live in `Software/GuitarPedal/guitar_pedal.cpp` (the main loop and audio callback) plus three new small headers under `Util/` and one virtual hook on `BaseEffectModule`. Pure logic (audio sanitizing, crash-record validation) is header-only with no Daisy dependencies so it can be unit-tested on the Mac with a tiny host Makefile. Everything else is verified by building for all five variants and by a hardware checklist on Ben's pedal.
 
 **Tech Stack:** C++20 on STM32H750 via libDaisy v8 and DaisySP, `arm-none-eabi-gcc` 10.3, GNU make, `dfu-util` 0.11, Apple clang for host tests, GitHub Actions "Build All" workflow.
 
-Spec: `docs/superpowers/specs/2026-09-26-firmware-next-design.md`, sections 2 and 7 (flashing guides). Sections 3 to 6 and the manual are later plans.
+Spec: `docs/superpowers/specs/2026-09-26-firmware-next-design.md`, sections 2, 7 (flashing guides), and 11 (knob map). Sections 3 to 6 and the manual are later plans.
 
 ## Global Constraints
 
@@ -31,7 +31,9 @@ Spec: `docs/superpowers/specs/2026-09-26-firmware-next-design.md`, sections 2 an
 | `Software/GuitarPedal/Util/crash_record.h` | New. Header-only, no Daisy includes. `CrashRecord` struct layout, magic, checksum, validity check. |
 | `Software/GuitarPedal/Util/crash_handler.cpp` | New. Defines `HardFault_Handler` (overrides libDaisy's weak default), writes a `CrashRecord` into backup SRAM, then spins until the watchdog reboots. |
 | `Software/GuitarPedal/Util/watchdog.h` | New. Thin wrapper over the STM32 HAL IWDG: `WatchdogStart(seconds)`, `WatchdogKick()`. |
-| `Software/GuitarPedal/Effect-Modules/base_effect_module.h` / `.cpp` | Modify. Add `virtual void Reset()` (default no-op) so the crash guard can clear an effect's internal state. |
+| `Software/GuitarPedal/Effect-Modules/base_effect_module.h` / `.cpp` | Modify. Add `virtual void Reset()` (default no-op) so the crash guard can clear an effect's internal state. Add the knob map: `SetKnobMapVisible`, `UsesKnobMap`, `DrawKnobMap`, and a shared `DrawPageArrows` helper. |
+| `Software/GuitarPedal/Effect-Modules/{autopan,chopper,metro,looper,scope,pitch_shifter}_module.h` | Modify. Override `UsesKnobMap()` to return false because they overlay their own graphics. |
+| `Software/GuitarPedal/UI/guitar_pedal_ui.h` / `.cpp` | Modify. Knob idle timer that tells the active effect when to show the map. |
 | `Software/GuitarPedal/Effect-Modules/delay_module.h` / `.cpp` | Modify. Override `Reset()` to clear the delay lines. |
 | `Software/GuitarPedal/guitar_pedal.cpp` | Modify. `SetActiveEffect` owns enable state and tuner on/off state; audio callback uses the guard; main loop kicks the watchdog and handles guard recovery; startup reports the last crash. |
 | `Software/GuitarPedal/Makefile` | Modify. Add `Util/crash_handler.cpp` to `CPP_SOURCES`. |
@@ -93,7 +95,7 @@ Memory region         Used Size  Region Size  %age Used
       RAM_D2_DMA:       16960 B        32 KB     51.76%
           RAM_D2:          0 GB       256 KB      0.00%
 ```
-Write the DTCMRAM and SRAM numbers into a scratch note; Task 9 compares against them. (Verified on Ben's Mac on 2026-09-26: DTCMRAM 119892 B, SRAM 408528 B, plus a BACKUP_SRAM line showing 12 B, which is libDaisy's own boot info and confirms the section Task 6 uses is live.)
+Write the DTCMRAM and SRAM numbers into a scratch note; Task 10 compares against them. (Verified on Ben's Mac on 2026-09-26: DTCMRAM 119892 B, SRAM 408528 B, plus a BACKUP_SRAM line showing 12 B, which is libDaisy's own boot info and confirms the section Task 6 uses is live.)
 
 - [ ] **Step 5: Confirm the other four variants build**
 
@@ -1182,7 +1184,219 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 8: Flashing guides for macOS and Windows
+### Task 8: Knob map screen
+
+Spec section 11. After the knobs have been idle for about 3 seconds, the default effect screen shows the effect name as a title plus a two-by-three grid naming what each knob controls. The base class draws it, so every effect gets it; six modules that overlay their own graphics opt out.
+
+**Files:**
+- Modify: `Software/GuitarPedal/Effect-Modules/base_effect_module.h` (public API near `DrawUI`, protected members near `m_isEnabled`)
+- Modify: `Software/GuitarPedal/Effect-Modules/base_effect_module.cpp` (`DrawUI` near line 435)
+- Modify: `Software/GuitarPedal/Effect-Modules/autopan_module.h`, `chopper_module.h`, `metro_module.h`, `looper_module.h`, `scope_module.h`, `pitch_shifter_module.h` (one override each)
+- Modify: `Software/GuitarPedal/UI/guitar_pedal_ui.h` (private members), `Software/GuitarPedal/UI/guitar_pedal_ui.cpp` (constructor, `UpdateActiveEffect`, `UpdateActiveEffectParameterValue`, `UpdateUI`)
+
+**Interfaces:**
+- Consumes: `GetMappedParameterIDForKnob(int)`, `GetParameterName(int)`, `m_name`, the existing `DrawUI` arrow-drawing code.
+- Produces:
+  - `void BaseEffectModule::SetKnobMapVisible(bool visible)`; the UI calls it every frame.
+  - `virtual bool BaseEffectModule::UsesKnobMap() const` default `true`.
+  - `void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn)` (protected).
+  - `void BaseEffectModule::DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect)` (protected), the arrow code extracted from `DrawUI` so both screens share it.
+  - `constexpr float kKnobMapIdleSeconds = 2.0f;` in `guitar_pedal_ui.cpp`. The main loop keeps reporting a knob for 1 s after it stops, so 2 s here lands at about 3 s of stillness.
+
+- [ ] **Step 1: Declare the API and members on the base class**
+
+In `base_effect_module.h`, directly after the `DrawUI` declaration (near line 273), add:
+```cpp
+
+    /** Tells the module whether the knob map should replace the default screen.
+     *  Set by the UI each frame from its knob idle timer. */
+    void SetKnobMapVisible(bool visible);
+
+    /** Modules that overlay their own graphics on the default screen return false so the
+     *  knob map never draws underneath them. Default true. */
+    virtual bool UsesKnobMap() const { return true; }
+```
+In the `protected:` section, directly after `bool m_isEnabled;`, add:
+```cpp
+    bool m_knobMapVisible = false;
+
+    /** Draws the previous/next page arrows into the left and right edges of rowRect and
+     *  shrinks rowRect to the space between them. Shared by DrawUI and DrawKnobMap. */
+    void DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect);
+
+    /** The knob map screen: title row with the effect name, then a 2x3 grid of the
+     *  parameter names mapped to knobs 0..5 in panel order. */
+    void DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn);
+```
+
+- [ ] **Step 2: Extract the arrow drawing and add the map**
+
+In `base_effect_module.cpp`, replace the whole existing `BaseEffectModule::DrawUI` (from its signature through the closing brace after the `showCPU` block) with:
+```cpp
+void BaseEffectModule::SetKnobMapVisible(bool visible) { m_knobMapVisible = visible; }
+
+void BaseEffectModule::DrawPageArrows(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle &rowRect) {
+    // Determine if there a page before or after this page
+    const bool hasPrev = currentIndex > 0;
+    const bool hasNext = currentIndex < numItemsTotal - 1;
+
+    // Draw the Arrows before and after
+    auto leftArrowRect = rowRect.RemoveFromLeft(9).WithSizeKeepingCenter(5, 9).Translated(0, -1);
+    auto rightArrowRect = rowRect.RemoveFromRight(9).WithSizeKeepingCenter(5, 9).Translated(0, -1);
+
+    if (hasPrev) {
+        for (int16_t x = leftArrowRect.GetRight() - 1; x >= leftArrowRect.GetX(); x--) {
+            display.DrawLine(x, leftArrowRect.GetY(), x, leftArrowRect.GetBottom(), true);
+
+            leftArrowRect = leftArrowRect.Reduced(0, 1);
+            if (leftArrowRect.IsEmpty())
+                break;
+        }
+    }
+
+    if (hasNext) {
+        for (int16_t x = rightArrowRect.GetX(); x < rightArrowRect.GetRight(); x++) {
+            display.DrawLine(x, rightArrowRect.GetY(), x, rightArrowRect.GetBottom(), true);
+
+            rightArrowRect = rightArrowRect.Reduced(0, 1);
+            if (rightArrowRect.IsEmpty())
+                break;
+        }
+    }
+}
+
+void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn) {
+    // Title row: the effect name (its class, e.g. "Delay") with the usual page arrows.
+    const int titleRowHeight = 12;
+    auto titleRect = boundsToDrawIn.RemoveFromTop(titleRowHeight);
+    DrawPageArrows(display, currentIndex, numItemsTotal, titleRect);
+    display.WriteStringAligned(m_name, Font_7x10, titleRect, Alignment::centered, true);
+
+    // Separator under the title
+    display.DrawLine(boundsToDrawIn.GetX(), boundsToDrawIn.GetY(), boundsToDrawIn.GetRight() - 1, boundsToDrawIn.GetY(), true);
+    boundsToDrawIn = boundsToDrawIn.RemoveFromBottom(boundsToDrawIn.GetHeight() - 2);
+
+    // 2 rows x 3 columns, in the order the knobs sit on the 125B panel:
+    // knob 0 top-left, 2 top-right, 3 bottom-left, 5 bottom-right.
+    const int columns = 3;
+    const int rows = 2;
+    const int cellWidth = boundsToDrawIn.GetWidth() / columns;
+    const int cellHeight = boundsToDrawIn.GetHeight() / rows;
+    const int maxLabelChars = 8; // Font_5x8: 8 chars = 40 px inside a 42 px cell
+
+    for (int knob = 0; knob < columns * rows; knob++) {
+        const int col = knob % columns;
+        const int row = knob / columns;
+        Rectangle cell(boundsToDrawIn.GetX() + col * cellWidth, boundsToDrawIn.GetY() + row * cellHeight, cellWidth, cellHeight);
+
+        char label[maxLabelChars + 1];
+        const int paramID = GetMappedParameterIDForKnob(knob);
+        if (paramID == -1) {
+            strncpy(label, "-", sizeof(label));
+        } else {
+            strncpy(label, GetParameterName(paramID), maxLabelChars);
+        }
+        label[maxLabelChars] = '\0';
+
+        display.WriteStringAligned(label, Font_5x8, cell, Alignment::centered, true);
+    }
+}
+
+void BaseEffectModule::DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
+                              bool isEditing) {
+    // By Default, the UI for an Effect Module is no different than it would be for the normal
+    // FullScreenItemMenu. A specific Effect Module is welcome to override this whole function
+    // to take over the full screen. Or overlay additional UI on top of this default UI.
+
+    // Once the knobs have been idle for a while, show what each knob does instead.
+    if (m_knobMapVisible && UsesKnobMap()) {
+        DrawKnobMap(display, currentIndex, numItemsTotal, boundsToDrawIn);
+        return;
+    }
+
+    // Top Half of Screen is for the Effect Name and arrow indicators
+    int topRowHeight = boundsToDrawIn.GetHeight() / 2;
+    auto topRowRect = boundsToDrawIn.RemoveFromTop(topRowHeight);
+
+    DrawPageArrows(display, currentIndex, numItemsTotal, topRowRect);
+
+    display.WriteStringAligned(m_name, Font_11x18, topRowRect, Alignment::centered, true);
+    display.WriteStringAligned("...", Font_11x18, boundsToDrawIn, Alignment::centered, true);
+
+    if (showCPU) {
+        char cpuStr[64];
+        sprintf(cpuStr, FLT_FMT(3), FLT_VAR3(GetCPUUsage()));
+        display.WriteStringAligned(cpuStr, Font_11x18, boundsToDrawIn, Alignment::bottomCentered, true);
+    }
+}
+```
+Confirm `<cstring>` (for `strncpy`) is included at the top of `base_effect_module.cpp`; add `#include <cstring>` if not. `Font_5x8` is declared in `dependencies/libDaisy/src/util/oled_fonts.h`, which `daisy_seed.h` already pulls in.
+
+- [ ] **Step 3: Opt out the six overlay modules**
+
+In each of `autopan_module.h`, `chopper_module.h`, `metro_module.h`, `looper_module.h`, `scope_module.h`, and `pitch_shifter_module.h`, in the `public:` section next to the existing `DrawUI` override declaration, add exactly:
+```cpp
+    bool UsesKnobMap() const override { return false; }
+```
+These six are the modules whose `DrawUI` calls `BaseEffectModule::DrawUI` and then draws more on top (verify with `grep -l "BaseEffectModule::DrawUI" Effect-Modules/*_module.cpp`; the list must match).
+
+- [ ] **Step 4: Add the idle timer to the UI**
+
+In `guitar_pedal_ui.h`, in the private section directly after `float m_secondsSinceLastActiveEffectSettingsSave;`, add:
+```cpp
+    float m_secondsSinceKnobActivity;
+```
+In `guitar_pedal_ui.cpp`:
+
+1. After the `using namespace bkshepherd;` line add:
+```cpp
+// Seconds of no knob-driven parameter changes before the knob map replaces the effect
+// name screen. The main loop keeps reporting a moving knob for 1 s after it stops, so
+// this lands at roughly 3 s of stillness.
+constexpr float kKnobMapIdleSeconds = 2.0f;
+```
+2. In the constructor initializer list, after `m_secondsSinceLastActiveEffectSettingsSave(0.0f)`, add `, m_secondsSinceKnobActivity(0.0f)`.
+3. In `UpdateActiveEffect`, inside the `if (hardware.SupportsDisplay())` block, before `InitEffectUiPages();`, add:
+```cpp
+        // A fresh effect shows its name first; the knob map follows after the idle time.
+        m_secondsSinceKnobActivity = 0.0f;
+```
+4. In `UpdateActiveEffectParameterValue`, inside `if (showChangeOnDisplay) {`, as the first line add:
+```cpp
+            m_secondsSinceKnobActivity = 0.0f;
+```
+5. In `UpdateUI`, directly after `activeEffect->UpdateUI(elapsedTime);`, add:
+```cpp
+
+    // Knob map: show it once the knobs have been idle long enough.
+    m_secondsSinceKnobActivity += elapsedTime;
+    activeEffect->SetKnobMapVisible(m_secondsSinceKnobActivity >= kKnobMapIdleSeconds);
+```
+
+- [ ] **Step 5: Build all variants and check memory**
+
+Run:
+```bash
+cd ~/DaisySeedProjects/.worktrees/next/Software/GuitarPedal && ./ci/format.sh && for v in 125B 1590B 1590B_SMD TERRARIUM FUNBOX; do make clean >/dev/null && make -j8 VARIANT=$v 2>&1 | grep -E "warning|error|DTCMRAM:|SRAM:"; done
+```
+Expected: no warnings or errors; DTCMRAM unchanged from the previous task; SRAM growth under 2 KB.
+
+- [ ] **Step 6: Hardware check**
+
+Flash Ben's pedal. Select Delay and leave the knobs alone. Within about 3 seconds the screen shows "Delay" as a small title with the arrows, a line, and six labels: top row `Delay Ti`, `D Feedba`, `Delay Mi` (or the first 8 characters of whatever knobs 0 to 2 map to), bottom row knobs 3 to 5. Turn a knob: the parameter pop-up appears as before; about 3 seconds after you stop, the map returns. Hold Alt and turn the encoder to Tremolo: the big name shows first, then the map. Switch to Tuner: full tuner screen, no map. Switch to Looper: its own overlay, no map. If the top row does not match the top row of knobs on the panel, note which knob is where and report it; the mapping is the `knob` to `col`/`row` lines in `DrawKnobMap`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd ~/DaisySeedProjects/.worktrees/next && git add Software/GuitarPedal/Effect-Modules Software/GuitarPedal/UI
+git commit -m "Show a knob map on the effect screen after the knobs go idle
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 9: Flashing guides for macOS and Windows
 
 Spec section 7, item 2. Both guides lead with the browser-based path, then give the command-line path, then first-time bootloader installation, then troubleshooting based on what happened on 2026-09-23.
 
@@ -1378,7 +1592,7 @@ Step-by-step guides, including where to download prebuilt firmware and how to fi
 
 - [ ] **Step 4: Verify the Mac guide against a real flash**
 
-Follow `docs/FLASHING-MAC.md` Method 2 literally on Ben's pedal using the `build/guitarpedal.bin` from Task 7, reading each step aloud as written. Anything that does not match what the terminal shows gets corrected in the guide before committing. Also check every link opens.
+Follow `docs/FLASHING-MAC.md` Method 2 literally on Ben's pedal using the `build/guitarpedal.bin` from Task 8, reading each step aloud as written. Anything that does not match what the terminal shows gets corrected in the guide before committing. Also check every link opens.
 
 - [ ] **Step 5: Commit**
 
@@ -1391,7 +1605,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: CI, memory check, and Steve's pedal
+### Task 10: CI, memory check, and Steve's pedal
 
 **Files:**
 - None new. This task pushes the branch and verifies the CI build.
@@ -1405,7 +1619,7 @@ Run:
 ```bash
 cd ~/DaisySeedProjects/.worktrees/next/Software/GuitarPedal && make -C tests && make clean >/dev/null && make -j8 2>&1 | grep -E "warning|error|DTCMRAM:|SRAM:"
 ```
-Expected: both test binaries pass. DTCMRAM under 95 percent, SRAM under 90 percent. Compare to the Task 0 numbers; the delta should be under 200 bytes DTCM and under 6 KB SRAM. If larger, find what grew with `arm-none-eabi-nm --size-sort build/guitarpedal.elf | tail -20` before continuing.
+Expected: both test binaries pass. DTCMRAM under 95 percent, SRAM under 90 percent. Compare to the Task 0 numbers; the delta should be under 200 bytes DTCM and under 8 KB SRAM. If larger, find what grew with `arm-none-eabi-nm --size-sort build/guitarpedal.elf | tail -20` before continuing.
 
 - [ ] **Step 2: Push and watch CI**
 
@@ -1428,7 +1642,7 @@ Put the pedal in bootloader mode (RESET, then BOOT within 5 seconds) and:
 ```bash
 dfu-util -a 0 -s 0x90040000:leave -D ~/Downloads/pedal-fw/125B.bin -d ,0483:df11
 ```
-Run every hardware check from Tasks 2, 4, 6, and 7 on this exact binary. All must pass.
+Run every hardware check from Tasks 2, 4, 6, 7, and 8 on this exact binary. All must pass.
 
 - [ ] **Step 4: Flash Steve's pedal**
 
@@ -1449,9 +1663,10 @@ Implements sections 2 and 7 (flashing guides) of docs/superpowers/specs/2026-09-
 - Audio guard: input clamp, non-finite output sanitizer, BaseEffectModule::Reset() hook (Delay clears its lines).
 - Hard fault handler records pc/lr/cfsr/effect in backup SRAM; next boot blinks and prints it.
 - Independent watchdog, 2 s.
+- Knob map screen after 3 s of knob inactivity (spec section 11).
 - docs/FLASHING-MAC.md and docs/FLASHING-WINDOWS.md.
 
-Hardware checks on Ben's and Steve's 125B pedals: (fill in from Task 9 steps 3 and 4)
+Hardware checks on Ben's and Steve's 125B pedals: (fill in from Task 10 steps 3 and 4)
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -1465,7 +1680,8 @@ EOF
 - Section 2.1 tuner: Task 2. Includes the "left input only, signal level" follow-up as a recorded observation in Step 6.
 - Section 2.2 LEDs: Task 2.
 - Section 2.3 mitigations 1, 2, 3: Tasks 4 (sanitizer, clamp, reset via Task 3) and 7 (watchdog). Diagnostics: Tasks 5 and 6. The spec's "mute for 20 ms" is `guardMuteTimeInSeconds = 0.02f`.
-- Section 7 item 2 flashing guides: Task 8, including both failure modes from 2026-09-23 in troubleshooting.
-- Section 8 testing for these items: Tasks 2, 4, 6, 7, 9 hardware checks; CI and memory limits in Task 9.
+- Section 11 knob map: Task 8.
+- Section 7 item 2 flashing guides: Task 9, including both failure modes from 2026-09-23 in troubleshooting.
+- Section 8 testing for these items: Tasks 2, 4, 6, 7, 8, 10 hardware checks; CI and memory limits in Task 10.
 - Section 9 sequence item 1: this plan. Items 2 to 6 are separate plans.
-- Names used consistently: `SetActiveEffect`, `effectOnBeforeTuner`, `BaseEffectModule::Reset`, `audio_guard::ClampInput`, `audio_guard::SanitizePair`, `CrashRecord`, `g_crashRecord`, `WatchdogStart`, `WatchdogKick`, `kEnableWatchdog`, `guardTripped`, `guardTripCount`, `guardMuteSamplesRemaining`.
+- Names used consistently: `SetActiveEffect`, `effectOnBeforeTuner`, `BaseEffectModule::Reset`, `audio_guard::ClampInput`, `audio_guard::SanitizePair`, `CrashRecord`, `g_crashRecord`, `WatchdogStart`, `WatchdogKick`, `kEnableWatchdog`, `guardTripped`, `guardTripCount`, `guardMuteSamplesRemaining`, `SetKnobMapVisible`, `UsesKnobMap`, `DrawKnobMap`, `DrawPageArrows`, `kKnobMapIdleSeconds`.

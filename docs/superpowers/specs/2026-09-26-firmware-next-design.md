@@ -2,13 +2,13 @@
 
 Date: 2026-09-26
 Branch: `feature/next` (from `main` at 5f5edda)
-Hardware target: 125B variant (Ben's and Steve's pedals). All changes must still build for the other four variants in CI.
+Hardware target: 125B variant (Ben's and Steve's pedals). On this build the right footswitch is Bypass and the left is Alt. All changes must still build for the other four variants in CI.
 
 ## 1. Goals
 
 1. Fix three field bugs: tuner receives no audio, LEDs go dark after switching effects with the encoder or menu, and hard crashes under loud input or feedback.
 2. Make the alternate footswitch useful on more effects: tap tempo on the modulation and delay effects, IR cycling on the IR module.
-3. Add a two-knob Fender-style tremolo and a dedicated Drop pitch module.
+3. Add a two-knob Fender-style tremolo, a dedicated Drop pitch module with a momentary mode, and a Space Echo style tape echo.
 4. Add "effect groups": named subsets of the loaded effects that can be cycled with both footswitches, so a player can lock a set for a gig.
 5. Ship a user manual and step-by-step flashing guides for macOS and Windows in the repo.
 
@@ -45,7 +45,9 @@ Mitigations, all three:
 2. **Input clamp**: clamp codec input to [-1, 1] before processing. Costs nothing and removes one class of overflow.
 3. **Independent watchdog** (IWDG, 2 s) kicked from the main loop. A hard fault or hang becomes a 2-second reboot instead of a frozen pedal. libDaisy exposes this directly.
 
-Diagnostics for the next crash: enable the hard-fault handler to flash both LEDs in a distinctive pattern and record the faulting address in a no-init RAM word that is printed over USB serial at next boot. Ask Steve which effect was active when it crashed.
+Steve's recollection is that a feedback or pitch-shift effect such as the Delay was active. That matches the first mechanism, so the crash-guard test in section 8 targets Delay at maximum feedback and Pitch at an octave.
+
+Diagnostics for the next crash: enable the hard-fault handler to flash both LEDs in a distinctive pattern and record the faulting address in a no-init RAM word that is printed over USB serial at next boot.
 
 ## 3. Footswitch gesture state machine
 
@@ -80,6 +82,8 @@ Current behavior is documented in the manual (section 7). Changes:
 | Flanger | Same |
 | AmpTrem (new, section 6) | Same |
 | IR | Tap cycles to the next impulse response, wrapping. Re-enable the commented code in `ir_module.cpp` with the signed-index fix. LED 1 blinks once on each step. |
+| Drop (new) | Hold shifts while held, in Moment mode |
+| TapeEcho (new) | Double tap sets Rate; hold pushes Repeats to maximum while held |
 
 Delay, Multi Delay, Tremolo, AutoPan, Chopper, Metronome, and Drum already implement tap tempo. Nothing else changes.
 
@@ -130,14 +134,27 @@ A two-knob amplifier-style tremolo.
 
 ### 6.2 Drop
 
-A dedicated latched pitch-down module, so the general Pitch module's six knobs are not needed for the common case.
+A dedicated pitch-down module, so the general Pitch module's six knobs are not needed for the common case. Always shifts down.
 
-- Parameters: `Semitones` (knob 0, binned 1 to 12, default 2), `Mix` (knob 1, default 1.0 wet).
-- Always latched, always down. No momentary mode, no ramp.
+- Parameters: `Semitones` (knob 0, binned 1 to 12, default 2), `Mix` (knob 1, default 1.0 wet), `Mode` (knob 2, binned Latch / Moment, default Latch).
+- Latch: shifted whenever the effect is engaged.
+- Moment: shifted only while the Alt footswitch is held, returning on release, with a fixed 100 ms ramp each way. No ramp knobs; the general Pitch module keeps those.
 - Delay size scales with the interval as the existing `SetTranspose` does. Latency is roughly 42 ms at one semitone and grows with the interval; document this.
-- Alt footswitch: no action.
+- LED 1 lit while the shift is active, so Moment mode is visible.
 - Reuses `Util/pitch_shifter.h` and its own pair of SDRAM buffers. SDRAM has ample room.
-- The general Pitch module stays in the build. Removing it later is a one-line change in `loaded_effects.h`.
+- The general Pitch module stays in the build and is already in the loaded list as "Pitch" (it was absent from the December 2024 firmware, which is why it was never found). Removing it later is a one-line change in `loaded_effects.h`.
+
+### 6.3 TapeEcho
+
+A tape echo modeled on the Roland RE-201 Space Echo control set, with the Akai Headrush E2's adjustable wow and flutter. Reuses the delay engine and the tape modulator that the Delay module gained in January 2026, and adds the two things a tape echo has that the Delay does not: saturation in the feedback loop and multiple playback heads.
+
+- Parameters: `Rate` (knob 0, delay time 40 to 800 ms, tap tempo sets it), `Repeats` (knob 1, feedback 0 to 1.1, so it can self-oscillate like the original but is limited by the saturator), `Echo Vol` (knob 2, wet mix), `Wow Flut` (knob 3, wow and flutter depth, 0 = clean digital), `Tone` (knob 4, low-pass in the feedback path, so each repeat gets darker), `Heads` (knob 5, binned: 1, 2, 3, 1+2, 2+3, 1+2+3, 1+3). Head spacing follows the RE-201: head 2 at 2x and head 3 at 3x the head 1 time.
+- Feedback loop: soft-clip saturation before the filter, so runaway repeats compress instead of clipping hard. This also keeps the loop finite, which matters for section 2.3.
+- Alt footswitch: double tap sets Rate from tempo. Alt hold: repeats to maximum while held, for the Space Echo self-oscillation trick, returning on release.
+- LED 1 pulses at the delay rate.
+- Stereo: same echo on both channels. Spread and ping-pong omitted in this version.
+- Delay buffers in SDRAM, three read taps. CPU cost is close to the existing Delay module.
+- Spring reverb from the RE-201 is out of scope; the Reverb module exists for that.
 
 ## 7. Documentation deliverables
 
@@ -155,21 +172,21 @@ There is no host build, so testing is on hardware plus CI.
   - Tuner: three entry routes from both bypass states.
   - LEDs: switch effects via encoder and menu while engaged; LED 0 stays lit.
   - Gestures: each row of the section 3 table, including that a Bypass tap never triggers the module's Alt action.
-  - Crash guard: run the Delay with feedback at maximum into a squeal for 30 seconds. Expect at worst a brief dropout, never a frozen pedal.
+  - Crash guard: run the Delay with feedback at maximum into a squeal for 30 seconds, then Pitch at an octave with the guitar feeding back into the amp. Expect at worst a brief dropout, never a frozen pedal.
   - Groups: build a group of four, cycle it with Both tap, confirm wrap, confirm knobs do not jump on switch, power cycle and confirm the group survives.
-  - AmpTrem and Drop: knobs, tap tempo on AmpTrem, LED behavior.
+  - AmpTrem, Drop, TapeEcho: knobs, tap tempo on AmpTrem and TapeEcho, Drop Moment mode on Alt hold, TapeEcho self-oscillation on Alt hold, LED behavior.
   - IR: Alt cycles and wraps.
 
 ## 9. Sequence
 
 1. Bug fixes (2.1, 2.2, 2.3) and the flashing guides. Flash Steve's pedal with this build first.
-2. AmpTrem and Drop modules.
+2. AmpTrem, Drop, and TapeEcho modules.
 3. Footswitch gesture state machine and Both tap next-effect.
 4. Effect groups and the Groups UI.
 5. Alt actions on Chorus, Phaser, Flanger, IR.
 6. Manual, written last so it describes the shipped behavior.
 
-## 10. Open questions
+## 10. Resolved questions
 
-1. Which physical footswitch is Bypass on the 125B build, left or right? Needed for the manual. It is one line in `guitar_pedal_125b.cpp` if it should be swapped.
-2. Which effect was active when Steve's pedal crashed?
+1. Bypass is the right footswitch and Alt is the left on Ben's and Steve's 125B builds. The manual uses those words.
+2. The effect active at the crashes is not known. Steve believes it was a feedback or pitch-shift effect such as the Delay. Section 2.3 covers this.

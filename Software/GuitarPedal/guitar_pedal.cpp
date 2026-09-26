@@ -1,6 +1,7 @@
 #include "daisysp.h"
 #include "guitar_pedal_storage.h"
 #include "loaded_effects.h"
+#include <atomic>
 #include <string.h>
 
 #include "UI/guitar_pedal_ui.h"
@@ -352,7 +353,12 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
     }
 
     // Handle Effect State being Toggled, here or by the main loop since the last block.
-    if (effectOn != appliedEffectOn) {
+    // Hold off while an effect switch is pending: a tuner quick switch undoes the press's
+    // toggle here and SetActiveEffect then sets the final state, so applying the
+    // in-between value would fade and click the relay only to reverse it a moment later.
+    // The main loop clears pendingEffectID only after SetActiveEffect returns, so the
+    // first block to see the final state applies just the net change, if any.
+    if (pendingEffectID == -1 && effectOn != appliedEffectOn) {
         appliedEffectOn = effectOn;
 
         // Set the stats on the effect
@@ -818,11 +824,14 @@ int main(void) {
             activeEffect->Reset();
         }
 
-        // Perform an effect switch the audio callback asked for.
+        // Perform an effect switch the audio callback asked for. Clear the request only
+        // after SetActiveEffect has set effectOn: the callback defers bypass transitions
+        // while a switch is pending (see the transition block in AudioCallback).
         if (pendingEffectID != -1) {
-            int id = pendingEffectID;
-            pendingEffectID = -1;
+            const int id = pendingEffectID;
             SetActiveEffect(id);
+            std::atomic_signal_fence(std::memory_order_seq_cst); // effectOn written before the clear
+            pendingEffectID = -1;
         }
 
         // If alt footswitch held AND encoder turned, iterate to next/previous effect, also throttle the changes

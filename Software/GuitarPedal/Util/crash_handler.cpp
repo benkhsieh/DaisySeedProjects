@@ -34,7 +34,9 @@ void CrashHardFaultHandlerC(uint32_t *stackFrame) {
     SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t *>(&bkshepherd::g_crashRecord), sizeof(bkshepherd::CrashRecord));
     __DSB();
 
-    // With a debugger attached, stop here so the fault can be inspected.
+    // With a debugger attached, stop here so the fault can be inspected. C_DEBUGEN stays
+    // set after a debugger detaches, until a power-on reset, so a fault after a debug
+    // session spins here and relies on the watchdog to reboot.
     if (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) {
         while (true) {
         }

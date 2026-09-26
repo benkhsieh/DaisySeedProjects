@@ -6,12 +6,7 @@
 #include "UI/guitar_pedal_ui.h"
 #include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
-#include "Util/crash_record.h"
-
-namespace bkshepherd {
-extern CrashRecord g_crashRecord;
-void InstallCrashHandler();
-} // namespace bkshepherd
+#include "Util/crash_handler.h"
 
 using namespace daisy;
 using namespace daisysp;

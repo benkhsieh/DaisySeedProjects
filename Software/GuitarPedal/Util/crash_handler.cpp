@@ -6,7 +6,7 @@
 // it at link time. Instead InstallCrashHandler() patches the live vector table, which is
 // writable because BOOT_SRAM apps run from AXI SRAM.
 
-#include "crash_record.h"
+#include "crash_handler.h"
 
 #include "daisy_seed.h"
 
@@ -14,7 +14,10 @@ extern int activeEffectID; // defined in guitar_pedal.cpp
 
 namespace bkshepherd {
 // Backup SRAM is not zeroed at reset, so the record survives a watchdog or fault reboot.
-CrashRecord g_crashRecord __attribute__((section(".backup_sram")));
+// The section is ".backup_sram.crash", not ".backup_sram": libDaisy's boot_info must stay
+// at the start of backup SRAM because the Daisy bootloader writes it there, and the linker
+// script places plain ".backup_sram" input before ".backup_sram*" input.
+CrashRecord g_crashRecord __attribute__((section(".backup_sram.crash")));
 } // namespace bkshepherd
 
 extern "C" {
@@ -25,6 +28,11 @@ void CrashHardFaultHandlerC(uint32_t *stackFrame) {
     const uint32_t stackedLr = stackFrame[5];
     const uint32_t stackedPc = stackFrame[6];
     bkshepherd::CrashRecordFill(bkshepherd::g_crashRecord, stackedPc, stackedLr, SCB->CFSR, activeEffectID, daisy::System::GetNow());
+
+    // Backup SRAM may be cacheable depending on MPU setup; push the record out so it is
+    // really in memory before the watchdog resets the core.
+    SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t *>(&bkshepherd::g_crashRecord), sizeof(bkshepherd::CrashRecord));
+    __DSB();
 
     // Do not try to recover. The watchdog started in main() resets the MCU within its
     // timeout, and the next boot reports the record.
@@ -47,8 +55,11 @@ namespace bkshepherd {
 void InstallCrashHandler() {
     const uint32_t vectorTableAddress = SCB->VTOR;
 
-    // A table in internal flash (non-bootloader builds) cannot be patched; leave libDaisy's.
-    if (vectorTableAddress >= 0x08000000u && vectorTableAddress < 0x08200000u) {
+    // Only patch a table that lives in writable RAM: AXI SRAM (BOOT_SRAM apps) or DTCM.
+    // Internal flash and memory-mapped QSPI tables are left to libDaisy's handler.
+    const bool inAxiSram = vectorTableAddress >= 0x24000000u && vectorTableAddress < 0x24080000u;
+    const bool inDtcm = vectorTableAddress >= 0x20000000u && vectorTableAddress < 0x20020000u;
+    if (!inAxiSram && !inDtcm) {
         return;
     }
 

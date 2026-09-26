@@ -7,6 +7,7 @@
 #include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
 #include "Util/crash_handler.h"
+#include "Util/watchdog.h"
 
 using namespace daisy;
 using namespace daisysp;
@@ -59,6 +60,11 @@ GuitarPedalUI guitarPedalUI;
 
 // Hardware Related Variables
 bool useDebugDisplay = false;
+
+// Set to false when debugging with a halted core, otherwise the watchdog resets the pedal.
+constexpr bool kEnableWatchdog = true;
+constexpr float kWatchdogTimeoutSeconds = 2.0f;
+
 bool effectOn = true;
 
 bool muteOn = false;
@@ -720,6 +726,11 @@ int main(void) {
     crossFaderLeft.SetPos(1.0f);
     crossFaderRight.SetPos(1.0f);
 
+    // A hang or hard fault now becomes a 2-second reboot instead of a frozen pedal.
+    if (kEnableWatchdog) {
+        WatchdogStart(kWatchdogTimeoutSeconds);
+    }
+
     // start callback
     hardware.StartAdc();
     hardware.StartAudio(AudioCallback);
@@ -731,6 +742,10 @@ int main(void) {
     // hardware.seed.StartLog();
 
     while (1) {
+        if (kEnableWatchdog) {
+            WatchdogKick();
+        }
+
         // Handle Clock Time
         uint32_t currentTimeStampUS = System::GetUs();
         uint32_t elapsedTimeStampUS = currentTimeStampUS - lastTimeStampUS;

@@ -1185,8 +1185,9 @@ inline IWDG_HandleTypeDef &WatchdogHandle() {
 /** Start the watchdog with the given timeout. LSI is 32 kHz; with prescaler 256 one tick
  *  is 8 ms, and the reload register is 12 bits, so the maximum timeout is about 32 s. */
 inline void WatchdogStart(float timeoutSeconds) {
-    constexpr float kTickSeconds = 256.0f / 32000.0f;
-    uint32_t reload = static_cast<uint32_t>(timeoutSeconds / kTickSeconds);
+    // 32 kHz LSI / 256 = 125 ticks per second. Round to nearest so 2.0 s is exactly 250.
+    constexpr float kTicksPerSecond = 125.0f;
+    uint32_t reload = static_cast<uint32_t>(timeoutSeconds * kTicksPerSecond + 0.5f);
     if (reload < 1) {
         reload = 1;
     }

@@ -46,6 +46,13 @@ constexpr bool has_alternate_footswitch = true;
 GuitarPedal125B hardware;
 #endif
 
+// .sram1_bss is NOLOAD, so the startup code never zeroes it. Objects we place there
+// (storage, guitarPedalUI) expect .bss semantics. Zero it before static constructors run.
+extern "C" char _ssram1_bss[];
+extern "C" char _esram1_bss[];
+extern "C" void ZeroD2Bss() { memset(_ssram1_bss, 0, static_cast<size_t>(_esram1_bss - _ssram1_bss)); }
+__attribute__((section(".preinit_array"), used)) static void (*const g_zeroD2Preinit)() = ZeroD2Bss;
+
 // Persistant Storage. Lives in D2 SRAM (non-cacheable, live at reset) to keep 8 KB out of
 // DTCM, which is the stack's only home. It is read a few words per audio block, which is fine.
 DMA_BUFFER_MEM_SECTION PersistentStorage<Settings> storage(hardware.seed.qspi);
@@ -640,24 +647,25 @@ int main(void) {
     // Route hard faults to our handler so the next boot can say what crashed.
     InstallCrashHandler();
 
-    // Report a crash from the previous run: the record on the screen for two seconds and
-    // five fast blinks of both LEDs, then clear it so it is reported only once.
+    // Report a crash from the previous run: the record stays on the screen until a
+    // footswitch is tapped (or, on display-less variants, through five fast blinks of both
+    // LEDs), then it is cleared so it is reported only once.
     if (CrashRecordIsValid(g_crashRecord)) {
         if (hardware.SupportsDisplay()) {
             char line[32];
             hardware.display.Fill(false);
             hardware.display.SetCursor(0, 0);
             hardware.display.WriteString("CRASH last run", Font_7x10, true);
-            hardware.display.SetCursor(0, 14);
+            hardware.display.SetCursor(0, 11);
             snprintf(line, sizeof(line), "pc %08lx", (unsigned long)g_crashRecord.pc);
             hardware.display.WriteString(line, Font_7x10, true);
-            hardware.display.SetCursor(0, 26);
+            hardware.display.SetCursor(0, 22);
             snprintf(line, sizeof(line), "lr %08lx", (unsigned long)g_crashRecord.lr);
             hardware.display.WriteString(line, Font_7x10, true);
-            hardware.display.SetCursor(0, 38);
+            hardware.display.SetCursor(0, 33);
             snprintf(line, sizeof(line), "cfsr %08lx", (unsigned long)g_crashRecord.cfsr);
             hardware.display.WriteString(line, Font_7x10, true);
-            hardware.display.SetCursor(0, 50);
+            hardware.display.SetCursor(0, 44);
             snprintf(line, sizeof(line), "fx %ld  %lus", (long)g_crashRecord.effectID,
                      (unsigned long)(g_crashRecord.uptimeMs / 1000u));
             hardware.display.WriteString(line, Font_7x10, true);
@@ -678,8 +686,10 @@ int main(void) {
 
         // Make the crash report impossible to miss: wait for a footswitch tap before
         // continuing, with a 60 s timeout so an unattended pedal still boots. The watchdog
-        // is not started until later in main(), so this wait cannot trigger it.
-        {
+        // is not started until later in main(), so this wait cannot trigger it. Display-less
+        // variants have nowhere to show the "tap a footswitch" prompt, so they just keep the
+        // five blinks above and move on.
+        if (hardware.SupportsDisplay()) {
             const uint32_t kCrashWaitTimeoutMs = 60000;
             uint32_t waitedMs = 0;
             bool footswitchTapped = false;

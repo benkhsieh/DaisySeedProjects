@@ -469,6 +469,43 @@ void BaseEffectModule::DrawPageArrows(OneBitGraphicsDisplay &display, int curren
     }
 }
 
+namespace {
+
+// Case-insensitive ASCII compare of the first n characters, without relying on strings.h.
+bool EqualsIgnoreCaseN(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'a' && ca <= 'z')
+            ca = static_cast<char>(ca - 'a' + 'A');
+        if (cb >= 'a' && cb <= 'z')
+            cb = static_cast<char>(cb - 'a' + 'A');
+        if (ca != cb)
+            return false;
+        if (ca == '\0')
+            break;
+    }
+    return true;
+}
+
+// Strips a leading "<effectName> " prefix from a parameter name so labels fit the knob-map
+// cell, e.g. "Delay Time" on effect "Delay" becomes "Time". Falls back to stripping a
+// leading "D " when the effect name itself starts with "D" (e.g. "D Feedback" on "Delay"
+// becomes "Feedback"), since several effects abbreviate their own name that way in their
+// parameter names instead of spelling it out.
+const char *StripEffectPrefix(const char *effectName, const char *paramName) {
+    const size_t effectNameLen = strlen(effectName);
+    if (EqualsIgnoreCaseN(paramName, effectName, effectNameLen) && paramName[effectNameLen] == ' ') {
+        return paramName + effectNameLen + 1;
+    }
+    if ((effectName[0] == 'D' || effectName[0] == 'd') && paramName[0] == 'D' && paramName[1] == ' ') {
+        return paramName + 2;
+    }
+    return paramName;
+}
+
+} // namespace
+
 void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn) {
     // Title row: the effect name (its class, e.g. "Delay") with the usual page arrows.
     const int titleRowHeight = 12;
@@ -486,7 +523,7 @@ void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIn
     const int rows = 2;
     const int cellWidth = boundsToDrawIn.GetWidth() / columns;
     const int cellHeight = boundsToDrawIn.GetHeight() / rows;
-    const int maxLabelChars = 8; // Font_5x8: 8 chars = 40 px inside a 42 px cell
+    const int maxLabelChars = 6; // Font_7x10: 6 chars = 42 px, exactly one 128/3 px cell
 
     for (int knob = 0; knob < columns * rows; knob++) {
         const int col = knob % columns;
@@ -495,14 +532,17 @@ void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIn
 
         char label[maxLabelChars + 1];
         const int paramID = GetMappedParameterIDForKnob(knob);
-        if (paramID == -1) {
-            strncpy(label, "-", sizeof(label));
-        } else {
-            strncpy(label, GetParameterName(paramID), maxLabelChars);
+        const char *src = (paramID == -1) ? "-" : StripEffectPrefix(m_name, GetParameterName(paramID));
+        // Copied by hand (not strncpy/snprintf) so intentionally truncating a long
+        // parameter name to fit the cell does not trip -Wstringop-truncation /
+        // -Wformat-truncation: label is always null-terminated below regardless.
+        int labelLen = 0;
+        for (; labelLen < maxLabelChars && src[labelLen] != '\0'; labelLen++) {
+            label[labelLen] = src[labelLen];
         }
-        label[maxLabelChars] = '\0';
+        label[labelLen] = '\0';
 
-        display.WriteStringAligned(label, Font_5x8, cell, Alignment::centered, true);
+        display.WriteStringAligned(label, Font_7x10, cell, Alignment::centered, true);
     }
 }
 

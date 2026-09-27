@@ -661,6 +661,8 @@ int main(void) {
             snprintf(line, sizeof(line), "fx %ld  %lus", (long)g_crashRecord.effectID,
                      (unsigned long)(g_crashRecord.uptimeMs / 1000u));
             hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 56);
+            hardware.display.WriteString("tap a footswitch", Font_6x8, true);
             hardware.display.Update();
         }
         for (int i = 0; i < 5; i++) {
@@ -672,6 +674,29 @@ int main(void) {
             hardware.SetLed(1, 0.0f);
             hardware.UpdateLeds();
             System::Delay(200);
+        }
+
+        // Make the crash report impossible to miss: wait for a footswitch tap before
+        // continuing, with a 60 s timeout so an unattended pedal still boots. The watchdog
+        // is not started until later in main(), so this wait cannot trigger it.
+        {
+            const uint32_t kCrashWaitTimeoutMs = 60000;
+            uint32_t waitedMs = 0;
+            bool footswitchTapped = false;
+            while (waitedMs < kCrashWaitTimeoutMs) {
+                hardware.ProcessDigitalControls();
+                for (int i = 0; i < hardware.GetSwitchCount(); i++) {
+                    if (hardware.switches[i].RisingEdge()) {
+                        footswitchTapped = true;
+                        break;
+                    }
+                }
+                if (footswitchTapped) {
+                    break;
+                }
+                System::Delay(10);
+                waitedMs += 10;
+            }
         }
         CrashRecordClear(g_crashRecord);
     }

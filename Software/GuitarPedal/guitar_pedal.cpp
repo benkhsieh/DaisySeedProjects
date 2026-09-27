@@ -8,6 +8,7 @@
 #include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
 #include "Util/crash_handler.h"
+#include "Util/stack_guard.h"
 #include "Util/watchdog.h"
 
 using namespace daisy;
@@ -624,6 +625,10 @@ void HandleMidiMessage(MidiEvent m) {
 }
 
 int main(void) {
+    // Paint the unused stack before anything else runs so the high-water mark measures
+    // the deepest point actually reached, not whatever main()'s own prologue used first.
+    StackPaint();
+
     const size_t blockSize = 48;
     const bool boost = true; // true enables cpu boost (480Mhz instead of 400Mhz)
 
@@ -849,6 +854,19 @@ int main(void) {
             SetActiveEffect(desiredIndex);
         }
 
+        // Hold the encoder button 3 s to toggle the debug screen (stack, guard trips, tempo).
+        {
+            static bool debugToggleArmed = true;
+            const float heldMs = hardware.encoders[0].TimeHeldMs();
+            if (heldMs > 3000.0f && debugToggleArmed) {
+                useDebugDisplay = !useDebugDisplay;
+                debugToggleArmed = false;
+            }
+            if (heldMs <= 0.0f) {
+                debugToggleArmed = true;
+            }
+        }
+
         if (hardware.SupportsDisplay()) {
             // Handle a Change in the Active Effect from the Menu System
 
@@ -877,7 +895,7 @@ int main(void) {
                 sprintf(strbuff, "tap: %d", switchEnabledCache[1]);
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.SetCursor(0, 30);
-                sprintf(strbuff, "dtap: %d", switchDoubleEnabledCache[1]);
+                sprintf(strbuff, "stk %lu/%lu", (unsigned long)StackFreeBytes(), (unsigned long)StackTotalBytes());
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.SetCursor(0, 45);
                 sprintf(strbuff, "BPM %ld", globalTempoBPM);

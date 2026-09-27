@@ -45,8 +45,9 @@ constexpr bool has_alternate_footswitch = true;
 GuitarPedal125B hardware;
 #endif
 
-// Persistant Storage
-PersistentStorage<Settings> storage(hardware.seed.qspi);
+// Persistant Storage. Lives in D2 SRAM (non-cacheable, live at reset) to keep 8 KB out of
+// DTCM, which is the stack's only home. It is read a few words per audio block, which is fine.
+DMA_BUFFER_MEM_SECTION PersistentStorage<Settings> storage(hardware.seed.qspi);
 
 // Effect Related Variables
 int availableEffectsCount = 0;
@@ -56,8 +57,8 @@ int prevActiveEffectID = 0;
 int tunerModuleIndex = -1;
 BaseEffectModule *activeEffect = nullptr;
 
-// UI Related Variables
-GuitarPedalUI guitarPedalUI;
+// UI Related Variables. In D2 SRAM for the same reason as storage.
+DMA_BUFFER_MEM_SECTION GuitarPedalUI guitarPedalUI;
 
 // Hardware Related Variables
 bool useDebugDisplay = false;

@@ -67,8 +67,8 @@ struct delaySpect {
     }
 };
 
-struct delaySpect delay_array_real[delay_array_size];
-struct delaySpect delay_array_imag[delay_array_size];
+struct delaySpect DSY_SDRAM_BSS delay_array_real[delay_array_size];
+struct delaySpect DSY_SDRAM_BSS delay_array_imag[delay_array_size];
 
 unsigned int filter_bin = 0;
 

@@ -194,3 +194,18 @@ Expected on 125B: DTCMRAM unchanged, SRAM may drop a little because `Font_5x8` i
 - [ ] Flash Ben's pedal. Then: boot; hold the encoder 3 s to open the debug screen and read `stk free/total` after (a) idle, (b) switching effects with Alt + encoder through the whole list twice, (c) 30 s of Delay squeal, (d) opening every menu. Record the smallest free value. Expect free never below 8 KB with total about 31 KB or more.
 - [ ] Reproduce the original crash procedure (spin the encoder through effects with Alt held) for two minutes. Expect no reboot. If it does reboot, the crash screen now stays until a footswitch tap; write down pc, cfsr, fx.
 - [ ] Knob map on Delay: labels readable, first row "Time", "Feedba", "Mix" (or per the stripping rule).
+
+
+### Task 5: Settings loader must survive an effect-list change (added 2026-09-28 after a boot-loop on hardware)
+
+Observed: after flashing the build that removed SciFi and Drum, the pedal faulted at every boot in `LoadEffectSettingsFromPersistantStorage()` (crash record pc 0x24003558, cfsr 0x8200 precise bus fault, fx 0, 3 s uptime). The stored settings were written by a firmware with 27 effects; the loader trusts the stored per-effect preset and parameter counts to advance its index, so with 25 effects it read garbage counts and indexed far outside the table. `SETTINGS_FILE_FORMAT_VERSION` had not changed, so no factory reset happened.
+
+**Files:** `Software/GuitarPedal/guitar_pedal_storage.h`, `Software/GuitarPedal/guitar_pedal_storage.cpp`.
+
+- [ ] Add `uint32_t globalEffectListFingerprint;` to `Settings` (and to `operator==`). Compute it in a helper `uint32_t ComputeEffectListFingerprint()` as FNV-1a 32-bit over, for each loaded effect in order, its name bytes, a 0 separator, and its parameter count byte; seed with `availableEffectsCount`. Store it in `defaultSettings` in `InitPersistantStorage`, and after `storage.Init`, treat a mismatch exactly like a version mismatch: `storage.RestoreDefaults()`.
+- [ ] Bump `SETTINGS_FILE_FORMAT_VERSION` to 9 (the struct changed).
+- [ ] Harden `LoadEffectSettingsFromPersistantStorage()`: before using any stored `presetsCount` or `prevParamCount`, and before every index into `globalEffectsSettings`, check `presetsCount >= 1 && presetsCount <= 64`, `prevParamCount <= 64`, and `index < SETTINGS_ABSOLUTE_MAX_PARAM_COUNT`. On any violation: call `storage.RestoreDefaults()`, then restart the load from the defaults (a single retry; if the defaults also fail the check, stop loading and leave modules at their compiled defaults). Never fault. Also validate `globalActiveEffectID` (already done) and the stored total-index word `globalEffectsSettings[0] <= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT`.
+- [ ] Host test: `tests/test_settings_layout.cpp` is not feasible because the loader depends on the module objects; instead add a comment block at the top of the loader describing the invariants and the recovery path, and verify on hardware by flashing over a pedal that holds settings from a different effect list (Ben's pedal today) and confirming it boots and shows defaults.
+- [ ] Build all variants, commit `Reset settings when the effect list changes; bounds-check the settings loader`.
+
+Manual recovery used on 2026-09-28: with the pedal in the Daisy bootloader, `dfu-util -a 0 -s 0x90000000:leave -D blank8k.bin -d ,0483:df11` writes 8 KB of 0xFF over the settings sectors, which `PersistentStorage::Init` treats as unformatted and replaces with defaults.

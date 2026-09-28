@@ -3,7 +3,10 @@
 #define GUITAR_PEDAL_STORAGE_H
 
 // Persistent Storage Settings
-#define SETTINGS_FILE_FORMAT_VERSION 8
+// Bumped to 9: added globalEffectListFingerprint (struct layout changed, and any store whose
+// fingerprint doesn't match the firmware's current effect list is now factory-reset too --
+// see the 2026-09-28 boot-loop note above LoadEffectSettingsFromPersistantStorage() in the .cpp).
+#define SETTINGS_FILE_FORMAT_VERSION 9
 
 // Arbitrarily limiting this to 4KB of stored presets since this sits in DTCMRAM which is limited to 128KB.
 // TODO: In the future it would be better if this worked with the QSPI directly instead of using
@@ -22,6 +25,14 @@ struct Settings {
     bool globalRelayBypassEnabled;
     bool globalSplitMonoInputToStereo;
 
+    // Fingerprint of the compiled-in effect list (names + parameter counts, see
+    // ComputeEffectListFingerprint() in guitar_pedal_storage.cpp). A stored settings block whose
+    // fingerprint doesn't match the running firmware's effect list was written for a different
+    // effect list (e.g. an effect was added/removed/reordered) and is factory-reset rather than
+    // trusted, since the per-effect preset/parameter counts it holds would no longer line up with
+    // `availableEffects`.
+    uint32_t globalEffectListFingerprint;
+
     // Set aside a block of memory for individual effect params.
     // Please note this MUST be a fixed amount of memory in the struct and cannot be a pointer to dynamic memory!
     // If you try to use a pointer it will only save the pointer address to QSPI storage and not any of the contents
@@ -32,7 +43,8 @@ struct Settings {
         if (fileFormatVersion != rhs.fileFormatVersion || globalActiveEffectID != rhs.globalActiveEffectID ||
             globalMidiEnabled != rhs.globalMidiEnabled || globalMidiThrough != rhs.globalMidiThrough ||
             globalMidiChannel != rhs.globalMidiChannel || globalRelayBypassEnabled != rhs.globalRelayBypassEnabled ||
-            globalSplitMonoInputToStereo != rhs.globalSplitMonoInputToStereo) {
+            globalSplitMonoInputToStereo != rhs.globalSplitMonoInputToStereo ||
+            globalEffectListFingerprint != rhs.globalEffectListFingerprint) {
             return false;
         }
 

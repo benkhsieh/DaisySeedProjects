@@ -20,6 +20,38 @@ uint32_t GetDefaultTotalIdxOfGlobalSettingsBlock() {
     }
     return tempSize;
 }
+
+// FNV-1a 32-bit fingerprint of the compiled-in effect list: seeded with availableEffectsCount,
+// then for each effect in order, every byte of its name, a 0 separator byte, and the low byte of
+// its parameter count. Two firmwares with the same effects in the same order and the same
+// parameter counts produce the same fingerprint; adding, removing, or reordering an effect (or
+// changing one's parameter count) changes it. Used by InitPersistantStorage() to detect a stored
+// settings block that was written for a different effect list than the one currently compiled in.
+uint32_t ComputeEffectListFingerprint() {
+    uint32_t hash = 2166136261U;
+    const uint32_t prime = 16777619U;
+
+    auto mixByte = [&hash, prime](uint8_t b) {
+        hash ^= b;
+        hash *= prime;
+    };
+
+    uint32_t effectsCount = static_cast<uint32_t>(availableEffectsCount);
+    for (size_t i = 0; i < sizeof(effectsCount); i++) {
+        mixByte(static_cast<uint8_t>((effectsCount >> (8 * i)) & 0xFFU));
+    }
+
+    for (int effectID = 0; effectID < availableEffectsCount; effectID++) {
+        const char *name = availableEffects[effectID]->GetName();
+        for (const char *c = name; *c != '\0'; ++c) {
+            mixByte(static_cast<uint8_t>(*c));
+        }
+        mixByte(0U);
+        mixByte(static_cast<uint8_t>(availableEffects[effectID]->GetParameterCount() & 0xFFU));
+    }
+
+    return hash;
+}
 void InitPersistantStorage() {
     Settings defaultSettings;
     defaultSettings.fileFormatVersion = SETTINGS_FILE_FORMAT_VERSION;
@@ -29,6 +61,7 @@ void InitPersistantStorage() {
     defaultSettings.globalMidiThrough = true;
     defaultSettings.globalRelayBypassEnabled = false;
     defaultSettings.globalSplitMonoInputToStereo = true;
+    defaultSettings.globalEffectListFingerprint = ComputeEffectListFingerprint();
 
     // All Effect Params in the settings should be zero'd
     for (int i = 0; i < SETTINGS_ABSOLUTE_MAX_PARAM_COUNT; i++) {
@@ -71,8 +104,14 @@ void InitPersistantStorage() {
 
     Settings &settings = storage.GetSettings();
 
-    // If the stored data is not the current version do a factory reset
-    if (settings.fileFormatVersion != SETTINGS_FILE_FORMAT_VERSION) {
+    // If the stored data is not the current version, or was written for a different effect list
+    // (an effect added/removed/reordered, or a parameter count changed), do a factory reset.
+    // Without the fingerprint check, a stored block from a different effect list would still
+    // pass the version check (if the file format itself didn't change) and then feed stale
+    // per-effect preset/parameter counts into LoadEffectSettingsFromPersistantStorage(), which
+    // is exactly what caused the 2026-09-28 boot loop after SciFi/Drum were removed.
+    if (settings.fileFormatVersion != SETTINGS_FILE_FORMAT_VERSION ||
+        settings.globalEffectListFingerprint != ComputeEffectListFingerprint()) {
         storage.RestoreDefaults();
     }
 
@@ -155,19 +194,123 @@ void LoadPresetFromPersistentStorage(uint32_t effectID, uint32_t presetID) {
     }
 }
 
-void LoadEffectSettingsFromPersistantStorage() {
+// Settings-table integrity guard for LoadEffectSettingsFromPersistantStorage().
+//
+// The stored table starting at settings.globalEffectsSettings[0] has no independent length or
+// checksum: the loader below discovers where each effect's data lives by walking forward,
+// trusting the stored `presetsCount`/`prevParamCount` words it reads along the way to know how
+// far to advance for each effect. This function performs that same walk using only reads --
+// it never mutates `settings` or any effect module -- and reports whether every index the real
+// loader would touch stays inside `globalEffectsSettings` (size SETTINGS_ABSOLUTE_MAX_PARAM_COUNT).
+// It returns false on the first violation it finds.
+//
+// For any effect, whichever of the loader's three branches runs (unchanged parameter count,
+// parameter(s) added, or parameter(s) removed), the loader ends up advancing its index by
+// exactly `paramCount` words for preset 0 (the current, compiled-in parameter count -- old
+// values are read and/or new ones appended/dropped to make up that width), then by
+// `paramCount * (presetsCount - 1)` words to skip the remaining presets and reach the next
+// effect's header. So the whole span an effect can touch is bounded by checking
+// `paramCount * presetsCount` fits from the current index, without needing to re-derive which
+// of the three branches will be taken.
+static bool SettingsLayoutLooksValid(const Settings &settings) {
     uint32_t globalEffectsSettingMemIdx = 0U;
+
+    if (settings.globalEffectsSettings[globalEffectsSettingMemIdx] > SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+        return false;
+    }
+    ++globalEffectsSettingMemIdx;
+
+    for (int effectID = 0; effectID < availableEffectsCount; effectID++) {
+        if (globalEffectsSettingMemIdx >= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+            return false;
+        }
+        uint32_t presetsCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
+        if (presetsCount < 1U || presetsCount > 64U) {
+            return false;
+        }
+        ++globalEffectsSettingMemIdx;
+
+        if (globalEffectsSettingMemIdx >= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+            return false;
+        }
+        uint32_t prevParamCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
+        if (prevParamCount > 64U) {
+            return false;
+        }
+        ++globalEffectsSettingMemIdx;
+
+        uint32_t paramCount = availableEffects[effectID]->GetParameterCount();
+        uint64_t span = static_cast<uint64_t>(paramCount) * static_cast<uint64_t>(presetsCount);
+        if (static_cast<uint64_t>(globalEffectsSettingMemIdx) + span > static_cast<uint64_t>(SETTINGS_ABSOLUTE_MAX_PARAM_COUNT)) {
+            return false;
+        }
+        globalEffectsSettingMemIdx += static_cast<uint32_t>(span);
+    }
+
+    return true;
+}
+
+// Loads Preset 0 of every effect's parameters from Persistent Storage into the effect modules.
+//
+// Invariants / recovery path (added 2026-09-28 after a boot loop on hardware: a settings block
+// written by a 27-effect firmware was loaded by a 25-effect firmware whose
+// SETTINGS_FILE_FORMAT_VERSION had not changed, so no factory reset ran; this loop trusted the
+// stale stored presetsCount/prevParamCount words to advance its index and walked far outside
+// globalEffectsSettings, producing a precise bus fault a few seconds into every boot):
+//   1. InitPersistantStorage() already resets to defaults on a fileFormatVersion mismatch *or* a
+//      globalEffectListFingerprint mismatch (effect list/order/param-count changed), so in the
+//      common case the table below was written by this exact firmware and matches its layout.
+//   2. Even so, this function never trusts that on faith: SettingsLayoutLooksValid() re-walks the
+//      table first. If it fails, storage.RestoreDefaults() is tried once and the table is
+//      re-checked; if it's still invalid, this function returns without loading anything, and
+//      every effect module simply keeps the compiled-in defaults it already has from Init().
+//   3. The loop below additionally re-checks its own bounds inline (breaking out of the loop on
+//      any violation) so that a table that satisfied SettingsLayoutLooksValid() up front, but
+//      would be walked differently by the loop for any reason, still cannot index outside
+//      globalEffectsSettings. No index here is ever used unchecked.
+// The net effect: this function must never fault, regardless of what garbage flash may contain.
+void LoadEffectSettingsFromPersistantStorage() {
     Settings &settings = storage.GetSettings();
+
+    if (!SettingsLayoutLooksValid(settings)) {
+        storage.RestoreDefaults();
+        if (!SettingsLayoutLooksValid(settings)) {
+            // Give up quietly; every effect module keeps the compiled defaults set in Init().
+            return;
+        }
+    }
+
+    uint32_t globalEffectsSettingMemIdx = 0U;
     uint32_t globalEffectsMaxIdx = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
     ++globalEffectsSettingMemIdx;
     // Load Preset 0 of each Effect Parameters, based on values from Persistant Storage
     for (int effectID = 0; effectID < availableEffectsCount; effectID++) {
+        if (globalEffectsSettingMemIdx >= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+            break;
+        }
         uint32_t presetsCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
+        if (presetsCount < 1U || presetsCount > 64U) {
+            break;
+        }
         availableEffects[effectID]->SetSettingsArrayStartIdx(globalEffectsSettingMemIdx);
         ++globalEffectsSettingMemIdx;
+
+        if (globalEffectsSettingMemIdx >= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+            break;
+        }
         uint32_t paramCount = availableEffects[effectID]->GetParameterCount();
         uint32_t prevParamCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
+        if (prevParamCount > 64U) {
+            break;
+        }
         ++globalEffectsSettingMemIdx;
+
+        // Every branch below reads/writes at most `paramCount` words starting here; bound that
+        // whole span up front so none of the three branches can read or write out of range.
+        if (static_cast<uint64_t>(globalEffectsSettingMemIdx) + paramCount > SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+            break;
+        }
+
         // If the two variables are the same, there's no problem, just load value from the global settings copy
         if (paramCount == prevParamCount) {
             for (uint32_t paramID = 0; paramID < paramCount; paramID++) {
@@ -201,6 +344,11 @@ void LoadEffectSettingsFromPersistantStorage() {
             // Shift the array and then add the new values
             globalEffectsMaxIdx = ShiftSettingsToMatchCurrentParameters(prevParamCount, paramCount, effectID, presetsCount,
                                                                         globalEffectsSettingMemIdx, globalEffectsMaxIdx);
+            if (globalEffectsMaxIdx == ERR_VALUE_MAX) {
+                // The shift couldn't fit inside SETTINGS_ABSOLUTE_MAX_PARAM_COUNT; stop rather than
+                // let a poisoned globalEffectsMaxIdx feed (and possibly overflow) a later shift call.
+                break;
+            }
             for (uint32_t paramID = prevParamCount; paramID < paramCount; paramID++) {
                 uint32_t value = availableEffects[effectID]->GetParameterRaw(paramID);
                 settings.globalEffectsSettings[globalEffectsSettingMemIdx] = value;
@@ -218,11 +366,20 @@ void LoadEffectSettingsFromPersistantStorage() {
             }
             globalEffectsMaxIdx = ShiftSettingsToMatchCurrentParameters(prevParamCount, paramCount, effectID, presetsCount,
                                                                         globalEffectsSettingMemIdx, globalEffectsMaxIdx);
+            if (globalEffectsMaxIdx == ERR_VALUE_MAX) {
+                break;
+            }
         }
         availableEffects[effectID]->SetPresetCount(presetsCount);
         /* Assume preset 0 for now */
         availableEffects[effectID]->SetCurrentPreset(0U);
-        globalEffectsSettingMemIdx += paramCount * (presetsCount - 1U);
+
+        // Bound the skip to the next effect's header before applying it.
+        uint64_t skip = static_cast<uint64_t>(paramCount) * static_cast<uint64_t>(presetsCount - 1U);
+        if (static_cast<uint64_t>(globalEffectsSettingMemIdx) + skip > SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+            break;
+        }
+        globalEffectsSettingMemIdx += static_cast<uint32_t>(skip);
     }
 }
 

@@ -127,7 +127,11 @@ uint32_t ShiftSettingsToMatchCurrentParameters(uint32_t prev_params, uint32_t cu
     Settings &settings = storage.GetSettings();
 
     newMaxIdx += presetsCount * (curr_params - prev_params);
-    if (newMaxIdx <= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+    // Valid indices into globalEffectsSettings are [0, SETTINGS_ABSOLUTE_MAX_PARAM_COUNT); newMaxIdx
+    // is used below as an inclusive last index, so it must be strictly less than the array size, not
+    // merely <=, or the loops just below would write/read globalEffectsSettings[SETTINGS_ABSOLUTE_MAX_PARAM_COUNT],
+    // one past the end.
+    if (newMaxIdx < SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
         if (curr_params > prev_params) {
             uint32_t diff = newMaxIdx - currentMaxIdx;
             for (uint32_t i = newMaxIdx; i >= shiftStartIdx; --i) {
@@ -155,7 +159,9 @@ uint32_t ShiftSettingsToAddNewPreset(int effectID, uint32_t params, uint32_t shi
     Settings &settings = storage.GetSettings();
 
     newMaxIdx += params;
-    if (newMaxIdx <= SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
+    // See the identical comment in ShiftSettingsToMatchCurrentParameters(): newMaxIdx is an inclusive
+    // last index, so it must be strictly less than the array size.
+    if (newMaxIdx < SETTINGS_ABSOLUTE_MAX_PARAM_COUNT) {
         uint32_t diff = newMaxIdx - currentMaxIdx;
         for (uint32_t i = newMaxIdx; i >= shiftStartIdx; --i) {
             settings.globalEffectsSettings[i] = settings.globalEffectsSettings[i - diff];
@@ -204,14 +210,26 @@ void LoadPresetFromPersistentStorage(uint32_t effectID, uint32_t presetID) {
 // loader would touch stays inside `globalEffectsSettings` (size SETTINGS_ABSOLUTE_MAX_PARAM_COUNT).
 // It returns false on the first violation it finds.
 //
-// For any effect, whichever of the loader's three branches runs (unchanged parameter count,
-// parameter(s) added, or parameter(s) removed), the loader ends up advancing its index by
-// exactly `paramCount` words for preset 0 (the current, compiled-in parameter count -- old
-// values are read and/or new ones appended/dropped to make up that width), then by
-// `paramCount * (presetsCount - 1)` words to skip the remaining presets and reach the next
-// effect's header. So the whole span an effect can touch is bounded by checking
-// `paramCount * presetsCount` fits from the current index, without needing to re-derive which
-// of the three branches will be taken.
+// This function requires `prevParamCount == paramCount` for every effect. That's not just a
+// simplification: InitPersistantStorage() already factory-resets on a
+// globalEffectListFingerprint mismatch, and the fingerprint is computed from each effect's name
+// *and parameter count*, so any table that reaches here with a matching fingerprint is
+// guaranteed to have been written by this exact compiled-in effect list -- `prevParamCount` can
+// only equal `paramCount`. A stored table where they differ is therefore never legitimate (it's
+// either corrupt or from a firmware build this fingerprint scheme can't have produced), so it is
+// rejected here rather than walked through the loader's grow/shrink branches, which only exist
+// to keep this validator's job simple: with parameter counts always matching, every effect's
+// span is just `paramCount * presetsCount` words (the presetsCount-1 additional presets, plus
+// preset 0), with no shifting to reason about.
+//
+// Finally, the walk's own end position is cross-checked against the stored word 0: `word 0 ==
+// GetDefaultTotalIdxOfGlobalSettingsBlock()`-style total-index-word convention. That helper (see
+// above) stores, for the compiled-in defaults (presetsCount == 1 for every effect),
+// `sum(2 + paramCount_i)` in word 0 -- i.e. the *highest occupied index* in the table, since the
+// body starts at index 1 and is that many words long. SaveEffectSettingsToPersitantStorageForEffectID()
+// keeps that invariant as presets are added. So after this walk finishes at `globalEffectsSettingMemIdx`
+// (one past the last word it covered), the highest occupied index is `globalEffectsSettingMemIdx - 1`,
+// and word 0 must equal exactly that.
 static bool SettingsLayoutLooksValid(const Settings &settings) {
     uint32_t globalEffectsSettingMemIdx = 0U;
 
@@ -225,7 +243,7 @@ static bool SettingsLayoutLooksValid(const Settings &settings) {
             return false;
         }
         uint32_t presetsCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
-        if (presetsCount < 1U || presetsCount > 64U) {
+        if (presetsCount < 1U || presetsCount > kMaxPresetsPerEffect) {
             return false;
         }
         ++globalEffectsSettingMemIdx;
@@ -234,17 +252,28 @@ static bool SettingsLayoutLooksValid(const Settings &settings) {
             return false;
         }
         uint32_t prevParamCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
-        if (prevParamCount > 64U) {
-            return false;
-        }
         ++globalEffectsSettingMemIdx;
 
+        // See the big comment above: with a matching fingerprint, prevParamCount can only be
+        // legitimate if it equals the compiled-in paramCount. This also makes a standalone
+        // "is prevParamCount a plausible small number" bound unnecessary -- paramCount itself is
+        // always a small, trusted (compiled-in) value, so the equality check below is a tighter
+        // bound than any arbitrary cap on the raw stored word could be.
         uint32_t paramCount = availableEffects[effectID]->GetParameterCount();
+        if (prevParamCount != paramCount) {
+            return false;
+        }
+
         uint64_t span = static_cast<uint64_t>(paramCount) * static_cast<uint64_t>(presetsCount);
         if (static_cast<uint64_t>(globalEffectsSettingMemIdx) + span > static_cast<uint64_t>(SETTINGS_ABSOLUTE_MAX_PARAM_COUNT)) {
             return false;
         }
         globalEffectsSettingMemIdx += static_cast<uint32_t>(span);
+    }
+
+    // Word 0 must equal the highest index this walk actually occupied (see the comment above).
+    if (globalEffectsSettingMemIdx == 0U || settings.globalEffectsSettings[0] != globalEffectsSettingMemIdx - 1U) {
+        return false;
     }
 
     return true;
@@ -264,6 +293,15 @@ static bool SettingsLayoutLooksValid(const Settings &settings) {
 //      table first. If it fails, storage.RestoreDefaults() is tried once and the table is
 //      re-checked; if it's still invalid, this function returns without loading anything, and
 //      every effect module simply keeps the compiled-in defaults it already has from Init().
+//      SettingsLayoutLooksValid() also requires prevParamCount == paramCount for every effect
+//      (see its own comment), so on the boot path below, the `prevParamCount < paramCount` and
+//      `prevParamCount > paramCount` branches -- and therefore every call this function makes
+//      into ShiftSettingsToMatchCurrentParameters(), which exists solely to serve those two
+//      branches -- are unreachable: only the "counts match" branch can run. Those branches and
+//      calls are left in place rather than deleted, as belt-and-suspenders in case that
+//      invariant is ever weakened (e.g. by a future change to the fingerprint or the
+//      validator), and because they carry their own inline bounds checks (see point 3 below)
+//      that keep this function safe on its own even if that invariant were to stop holding.
 //   3. The loop below additionally re-checks its own bounds inline (breaking out of the loop on
 //      any violation) so that a table that satisfied SettingsLayoutLooksValid() up front, but
 //      would be walked differently by the loop for any reason, still cannot index outside
@@ -289,7 +327,7 @@ void LoadEffectSettingsFromPersistantStorage() {
             break;
         }
         uint32_t presetsCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
-        if (presetsCount < 1U || presetsCount > 64U) {
+        if (presetsCount < 1U || presetsCount > kMaxPresetsPerEffect) {
             break;
         }
         availableEffects[effectID]->SetSettingsArrayStartIdx(globalEffectsSettingMemIdx);
@@ -300,10 +338,15 @@ void LoadEffectSettingsFromPersistantStorage() {
         }
         uint32_t paramCount = availableEffects[effectID]->GetParameterCount();
         uint32_t prevParamCount = settings.globalEffectsSettings[globalEffectsSettingMemIdx];
-        if (prevParamCount > 64U) {
+        ++globalEffectsSettingMemIdx;
+
+        // SettingsLayoutLooksValid() already required prevParamCount == paramCount for every
+        // effect before this loop was allowed to run (see the comment above), so this can only
+        // fail if the table changed under us between that check and here; re-checking it locally
+        // means the grow/shrink branches below are unreachable, not just "assumed unreachable".
+        if (prevParamCount != paramCount) {
             break;
         }
-        ++globalEffectsSettingMemIdx;
 
         // Every branch below reads/writes at most `paramCount` words starting here; bound that
         // whole span up front so none of the three branches can read or write out of range.
@@ -397,15 +440,22 @@ void SaveEffectSettingsToPersitantStorageForEffectID(int effectID, uint32_t pres
         startIdx = availableEffects[effectID]->GetSettingsArrayStartIdx() + 2 + (paramCount * presetID);
 
         if (presetID >= presetCount) {
-            // Ignore whatever presetID was given and just increment by 1
-            startIdx = availableEffects[effectID]->GetSettingsArrayStartIdx() + 2 + (paramCount * presetCount);
-            globalEffectsMaxIdx = ShiftSettingsToAddNewPreset(effectID, paramCount, startIdx, globalEffectsMaxIdx);
-            if (globalEffectsMaxIdx == ERR_VALUE_MAX) {
-                // TODO: Log some error message, for now don't do anything and prevent the adding the new preset
+            if (presetCount >= kMaxPresetsPerEffect) {
+                // Refuse to grow past the same cap SettingsLayoutLooksValid() enforces on load
+                // (guitar_pedal_storage.cpp); without this, a save could write a presetsCount
+                // word the loader would then reject wholesale on the next boot.
                 canWriteNewPreset = false;
             } else {
-                presetCount += 1;
-                availableEffects[effectID]->SetPresetCount(presetCount);
+                // Ignore whatever presetID was given and just increment by 1
+                startIdx = availableEffects[effectID]->GetSettingsArrayStartIdx() + 2 + (paramCount * presetCount);
+                globalEffectsMaxIdx = ShiftSettingsToAddNewPreset(effectID, paramCount, startIdx, globalEffectsMaxIdx);
+                if (globalEffectsMaxIdx == ERR_VALUE_MAX) {
+                    // TODO: Log some error message, for now don't do anything and prevent the adding the new preset
+                    canWriteNewPreset = false;
+                } else {
+                    presetCount += 1;
+                    availableEffects[effectID]->SetPresetCount(presetCount);
+                }
             }
         }
 

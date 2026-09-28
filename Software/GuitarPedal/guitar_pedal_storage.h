@@ -15,6 +15,12 @@
 #define SETTINGS_ABSOLUTE_MAX_PARAM_COUNT 1024
 #define ERR_VALUE_MAX 0xffffffff
 
+// Ceiling on how many presets a single effect may have. Enforced both when a new preset would
+// be created (SaveEffectSettingsToPersitantStorageForEffectID(), guitar_pedal_storage.cpp) and
+// when validating a stored settings table before trusting it (SettingsLayoutLooksValid(),
+// guitar_pedal_storage.cpp) -- kept as one constant so the two can't drift apart.
+constexpr uint32_t kMaxPresetsPerEffect = 64;
+
 // Save System Variables
 struct Settings {
     int fileFormatVersion;

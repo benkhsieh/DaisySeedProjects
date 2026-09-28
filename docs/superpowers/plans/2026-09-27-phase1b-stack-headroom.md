@@ -209,3 +209,16 @@ Observed: after flashing the build that removed SciFi and Drum, the pedal faulte
 - [ ] Build all variants, commit `Reset settings when the effect list changes; bounds-check the settings loader`.
 
 Manual recovery used on 2026-09-28: with the pedal in the Daisy bootloader, `dfu-util -a 0 -s 0x90000000:leave -D blank8k.bin -d ,0483:df11` writes 8 KB of 0xFF over the settings sectors, which `PersistentStorage::Init` treats as unformatted and replaces with defaults.
+
+
+### Task 6: Fix the per-switch heap leak; bound the heap (added 2026-09-28 after a 144 s crash on hardware)
+
+Observed: crash record pc 0x24004c50 (inside `GuitarPedalUI::InitEffectUiPages`, right after constructing a `MyMappedFloatValue`), cfsr 0x0400 (imprecise bus fault, i.e. a store to an invalid address), fx 13, 144 s uptime, while holding Alt and scrolling the encoder through effects. Cause: `InitEffectUiPages` deletes each `MappedIntValue` and `MappedStringListValue` element before freeing the arrays, but for `m_activeEffectSettingFloatValues` it only frees the pointer array; every `MyMappedFloatValue` (40 B) is leaked on every effect change. The heap lives in the 256 KB RAM_D2 bank starting at `end` = 0x30008000, and libnosys `_sbrk` has no upper bound, so the heap eventually grows past 0x30048000 into unmapped space and the constructor's stores fault. This predates the branch and matches the pedals' crash-on-switching history.
+
+**Files:** `Software/GuitarPedal/UI/guitar_pedal_ui.cpp` (cleanup block ~189-192); new `Software/GuitarPedal/Util/heap.cpp`; `Software/GuitarPedal/guitar_pedal.cpp` (debug screen line).
+
+- [ ] In `InitEffectUiPages`, mirror the Int/String cleanup for floats: loop `i < m_numActiveEffectSettingsItems`, `delete m_activeEffectSettingFloatValues[i]` when non-null, then `delete[]` the array. (Note the Bool array and the menu-items array are freed after `m_numActiveEffectSettingsItems` is zeroed; that is fine because they are `delete[]` only.)
+- [ ] Add `Util/heap.cpp` defining `extern "C" void *_sbrk(ptrdiff_t incr)` (overrides libnosys): bump-allocate from `end` (linker symbol, `extern "C" char end[]`) up to a hard limit `kHeapLimit = 0x30048000` (end of RAM_D2; derive from the linker symbol if one exists, else the constant with a comment). Track `g_heapHighWater`. On exhaustion: fill the crash record via `CrashRecordFill(g_crashRecord, 0, 0, 0x48454150u /* 'HEAP' */, activeEffectID, System::GetNow())`, clean the cache line, and `NVIC_SystemReset()`, so a leak reports itself on the next boot as cfsr 48454150 instead of a random bus fault. Expose `uint32_t HeapUsedBytes()` and `uint32_t HeapTotalBytes()`.
+- [ ] Debug screen: add a line `heap <used>/<total>` next to `stk`.
+- [ ] Verify with nm that our `_sbrk` is the one linked (not `libnosys.a(sbrk.o)`), build all five variants, commit `Fix float menu value leak on effect switch; bound the heap with a crash record`.
+- [ ] Hardware (Task 4 addendum): open the debug screen, note `heap used`, scroll through all effects twice with Alt held, reopen: `heap used` must return to the same value (no growth). Then five minutes of scrolling: no reboot.

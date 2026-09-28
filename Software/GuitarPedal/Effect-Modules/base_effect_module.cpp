@@ -523,7 +523,8 @@ void BaseEffectModule::DrawKnobMap(OneBitGraphicsDisplay &display, int currentIn
     const int rows = 2;
     const int cellWidth = boundsToDrawIn.GetWidth() / columns;
     const int cellHeight = boundsToDrawIn.GetHeight() / rows;
-    const int maxLabelChars = 6; // Font_7x10: 6 chars = 42 px, exactly one 128/3 px cell
+    const int maxLabelChars =
+        4; // Font_7x10: 4 chars = 28 px, centered in a 42 px cell; short abbreviations read better than six-letter cuts
 
     for (int knob = 0; knob < columns * rows; knob++) {
         const int col = knob % columns;

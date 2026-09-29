@@ -5,7 +5,7 @@ CXX ?= c++
 # -ffinite-math-only) spelled so Apple clang does not warn that -Ofast is deprecated.
 CXXFLAGS ?= -std=c++20 -Wall -Wextra -Werror -O3 -ffast-math
 
-TESTS := test_audio_guard test_crash_record
+TESTS := test_audio_guard test_crash_record test_tape_saturator
 BUILD := build
 
 .PHONY: all clean $(TESTS)
@@ -20,6 +20,9 @@ $(BUILD)/test_audio_guard: test_audio_guard.cpp ../Util/audio_guard.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(BUILD)/test_crash_record: test_crash_record.cpp ../Util/crash_record.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(BUILD)/test_tape_saturator: test_tape_saturator.cpp ../Util/tape_saturator.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(BUILD):

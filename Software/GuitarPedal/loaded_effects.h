@@ -32,6 +32,7 @@
 
 // Include all effect modules
 #include "Effect-Modules/amp_module.h"
+#include "Effect-Modules/amp_tremolo_module.h"
 #include "Effect-Modules/autopan_module.h"
 #include "Effect-Modules/chopper_module.h"
 #include "Effect-Modules/chorus_module.h"
@@ -96,6 +97,7 @@ void load_effects(int &availableEffectsCount, BaseEffectModule **&availableEffec
         new IrModule(),
         new PhaserModule(),
         new FlangerModule(),
+        new AmpTremoloModule(),
 
         // The following require a MIDI keyboard
         // new MidiKeysModule(),

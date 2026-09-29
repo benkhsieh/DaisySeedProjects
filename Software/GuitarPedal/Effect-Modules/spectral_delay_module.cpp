@@ -50,11 +50,18 @@ float vtone = 0.0;
 bool mono_mode = false;
 
 struct delaySpect {
+    // No member has a default initializer: this struct lives in DSY_SDRAM_BSS (.sdram_bss),
+    // which is NOLOAD and is never zeroed by the startup code (only .bss, in DTCM, is).
+    // A default initializer here (previously "active = false") makes the implicit default
+    // constructor non-trivial, and GCC folds the resulting zeroing into the translation
+    // unit's static-initializer function, which runs before hardware.Init() brings up the
+    // SDRAM controller. Every member here must instead be assigned explicitly in Init(),
+    // below, after hardware.Init() has run.
     DelayLine<float, MAX_DELAY_SPECTRAL_DELAY> *del;
     float currentDelay;
     float delayTarget;
     float feedback;
-    float active = false;
+    float active;
 
     float Process(float in) {
         // set delay times
@@ -67,8 +74,8 @@ struct delaySpect {
     }
 };
 
-struct delaySpect delay_array_real[delay_array_size];
-struct delaySpect delay_array_imag[delay_array_size];
+struct delaySpect DSY_SDRAM_BSS delay_array_real[delay_array_size];
+struct delaySpect DSY_SDRAM_BSS delay_array_imag[delay_array_size];
 
 unsigned int filter_bin = 0;
 
@@ -154,12 +161,16 @@ void SpectralDelayModule::Init(float sample_rate) {
         delayLine_array_real[i].Init();
         delay_array_real[i].del = &delayLine_array_real[i];
         delay_array_real[i].delayTarget = 100; // in samples
+        // currentDelay starts at delayTarget (not 0) so there is no ramp-up transient and,
+        // more importantly, so it never depends on SDRAM's uninitialized power-on content.
+        delay_array_real[i].currentDelay = 100;
         delay_array_real[i].feedback = 0.0;
         delay_array_real[i].active = true;
 
         delayLine_array_imag[i].Init();
         delay_array_imag[i].del = &delayLine_array_imag[i];
         delay_array_imag[i].delayTarget = 100; // in samples
+        delay_array_imag[i].currentDelay = 100;
         delay_array_imag[i].feedback = 0.0;
         delay_array_imag[i].active = true;
     }

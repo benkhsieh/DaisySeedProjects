@@ -3,6 +3,13 @@ This is a demo of a pedal board I put together using 3 of my custom Daisy Seed b
 
 [![Demo Video](https://img.youtube.com/vi/ZkLnS43acQo/0.jpg)](https://www.youtube.com/watch?v=ZkLnS43acQo)
 
+## Flashing a pedal
+
+Step-by-step guides, including where to download prebuilt firmware and how to fix the usual USB problems:
+
+- [Flashing from a Mac](docs/FLASHING-MAC.md)
+- [Flashing from Windows](docs/FLASHING-WINDOWS.md)
+
 ## Software Projects:
 ### 1. [Guitar Multi-Effect Pedal](Software/GuitarPedal/README.md)
 The software that can run on any of the custom Guitar Pedal hardware projects listed below as well at the PedalPCB Terrarium hardware.  This software is a flexible platform that abstracts the underlying Guitar Pedal hardware and allows a collection of Effects Modules to run on any of those hardware platforms.

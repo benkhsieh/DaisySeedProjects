@@ -1,10 +1,16 @@
 #include "daisysp.h"
 #include "guitar_pedal_storage.h"
 #include "loaded_effects.h"
+#include <atomic>
 #include <string.h>
 
 #include "UI/guitar_pedal_ui.h"
+#include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
+#include "Util/crash_handler.h"
+#include "Util/heap.h"
+#include "Util/stack_guard.h"
+#include "Util/watchdog.h"
 
 using namespace daisy;
 using namespace daisysp;
@@ -41,8 +47,16 @@ constexpr bool has_alternate_footswitch = true;
 GuitarPedal125B hardware;
 #endif
 
-// Persistant Storage
-PersistentStorage<Settings> storage(hardware.seed.qspi);
+// .sram1_bss is NOLOAD, so the startup code never zeroes it. Objects we place there
+// (storage, guitarPedalUI) expect .bss semantics. Zero it before static constructors run.
+extern "C" char _ssram1_bss[];
+extern "C" char _esram1_bss[];
+extern "C" void ZeroD2Bss() { memset(_ssram1_bss, 0, static_cast<size_t>(_esram1_bss - _ssram1_bss)); }
+__attribute__((section(".preinit_array"), used)) static void (*const g_zeroD2Preinit)() = ZeroD2Bss;
+
+// Persistant Storage. Lives in D2 SRAM (non-cacheable, live at reset) to keep 8 KB out of
+// DTCM, which is the stack's only home. It is read a few words per audio block, which is fine.
+DMA_BUFFER_MEM_SECTION PersistentStorage<Settings> storage(hardware.seed.qspi);
 
 // Effect Related Variables
 int availableEffectsCount = 0;
@@ -52,12 +66,29 @@ int prevActiveEffectID = 0;
 int tunerModuleIndex = -1;
 BaseEffectModule *activeEffect = nullptr;
 
-// UI Related Variables
-GuitarPedalUI guitarPedalUI;
+// UI Related Variables. In D2 SRAM for the same reason as storage.
+DMA_BUFFER_MEM_SECTION GuitarPedalUI guitarPedalUI;
 
 // Hardware Related Variables
 bool useDebugDisplay = false;
+
+// Set to false when debugging with a halted core, otherwise the watchdog resets the pedal.
+constexpr bool kEnableWatchdog = true;
+constexpr float kWatchdogTimeoutSeconds = 2.0f;
+
 bool effectOn = true;
+
+// The effectOn value the audio callback last applied (SetEnabled, crossfade, relay and
+// mute). The callback compares effectOn against this every block, so a change made
+// anywhere (footswitch in the callback, or SetActiveEffect in the main loop via menu,
+// encoder, MIDI or a tuner quick switch) runs the same transition. Set in main() before
+// audio starts.
+static bool appliedEffectOn = true;
+
+// Effect switch requested by the audio callback (tuner quick switch, or cycling on a
+// screenless pedal). SetActiveEffect rebuilds UI heap arrays, so it must not run in the
+// interrupt; the main loop performs the switch. -1 means no request.
+volatile int pendingEffectID = -1;
 
 bool muteOn = false;
 float muteOffTransitionTimeInSeconds = 0.02f;
@@ -77,7 +108,9 @@ uint32_t last_save_time; // Time we last set it
 
 // Used to debounce quick switching to/from the tuner
 bool ignoreBypassSwitchUntilNextActuation = false;
-bool effectActiveBeforeQuickSwitch = false;
+
+// Effect on/off state to restore when leaving the tuner. Owned by SetActiveEffect.
+bool effectOnBeforeTuner = true;
 
 // Time we last changed effect
 uint32_t last_effect_change_time;
@@ -111,7 +144,14 @@ int crossFaderTransitionTimeInSamples;
 int samplesTilCrossFadingComplete;
 CpuLoadMeter cpuLoadMeter;
 
-void SetActiveEffect(int effectID);
+// Audio guard state. The callback sets guardTripped when the active effect produced a
+// non-finite sample; the main loop resets the effect and clears the flag. While
+// guardMuteSamplesRemaining > 0 the output is silenced so the recovery is inaudible.
+volatile bool guardTripped = false;
+int guardMuteSamplesRemaining = 0;
+uint32_t guardTripCount = 0;
+const float guardMuteTimeInSeconds = 0.02f;
+int guardMuteTimeInSamples;
 
 static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
     cpuLoadMeter.OnBlockStart();
@@ -180,10 +220,6 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
         }
     }
 
-    // Store the previous value of the effect bypass so that we can determine if
-    // we need to perform a toggle at the end of processing the switches
-    bool oldEffectOn = effectOn;
-
     // Process potential footswitch actions before the main switch processing loop
     if (has_alternate_footswitch) {
         // Handle the scenario where have 2 footswitches
@@ -209,24 +245,15 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
             // If we have a screen and there is a tuner module, we quick switch
             // to it, otherwise we just cycle through the effects
             if (hardware.SupportsDisplay() && tunerModuleIndex > 0) {
-                // Start the quick switch to the tuner
+                // The rising edge of this same press already toggled effectOn. Undo that
+                // so SetActiveEffect saves and restores the state the player actually had.
+                effectOn = !effectOn;
+
+                // The main loop performs the switch (see pendingEffectID).
                 if (activeEffectID == tunerModuleIndex) {
-                    // Set back the active effect before the quick switch
-                    SetActiveEffect(prevActiveEffectID);
-
-                    // Restore the effect state from when we quick switched, this is an
-                    // inverse because the act of holding the switch caused the state to
-                    // chnage due to the rising edge being detected
-                    effectOn = !effectActiveBeforeQuickSwitch;
-                    activeEffect->SetEnabled(effectOn);
+                    pendingEffectID = prevActiveEffectID;
                 } else {
-                    // Store if effect is on or not when quick switching
-                    effectActiveBeforeQuickSwitch = effectOn;
-
-                    // Switch to tuner and force it to be enabled
-                    SetActiveEffect(tunerModuleIndex);
-                    effectOn = true;
-                    activeEffect->SetEnabled(effectOn);
+                    pendingEffectID = tunerModuleIndex;
                 }
                 ignoreBypassSwitchUntilNextActuation = true;
             } else {
@@ -242,10 +269,10 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
                     newActiveEffectId = 0;
                 }
 
-                SetActiveEffect(newActiveEffectId);
-
+                // Cycling on a screenless pedal lands on the new effect bypassed. The main
+                // loop performs the switch (see pendingEffectID).
                 effectOn = false;
-                activeEffect->SetEnabled(effectOn);
+                pendingEffectID = newActiveEffectId;
 
                 ignoreBypassSwitchUntilNextActuation = true;
             }
@@ -335,16 +362,29 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
         hardware.SetAudioMute(false);
     }
 
-    // Handle Effect State being Toggled.
-    if (effectOn != oldEffectOn) {
+    // Handle Effect State being Toggled, here or by the main loop since the last block.
+    // Hold off while an effect switch is pending: a tuner quick switch undoes the press's
+    // toggle here and SetActiveEffect then sets the final state, so applying the
+    // in-between value would fade and click the relay only to reverse it a moment later.
+    // The main loop clears pendingEffectID only after SetActiveEffect returns, so the
+    // first block to see the final state applies just the net change, if any.
+    if (pendingEffectID == -1 && effectOn != appliedEffectOn) {
+        appliedEffectOn = effectOn;
+
         // Set the stats on the effect
         if (activeEffect != nullptr) {
             activeEffect->SetEnabled(effectOn);
         }
 
-        // Setup the crossfade
+        // Setup the crossfade. If a fade is still running (a quick switch can reverse one a
+        // block after it starts), continue from its current position instead of jumping
+        // to the far end, which would click.
+        if (isCrossFading) {
+            samplesTilCrossFadingComplete = crossFaderTransitionTimeInSamples - samplesTilCrossFadingComplete;
+        } else {
+            samplesTilCrossFadingComplete = crossFaderTransitionTimeInSamples;
+        }
         isCrossFading = true;
-        samplesTilCrossFadingComplete = crossFaderTransitionTimeInSamples;
         isCrossFadingForward = effectOn;
 
         // Start the timing sequence for the Hardware Mute and Relay Bypass.
@@ -393,9 +433,10 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
             }
         }
 
-        // Handle Mono vs Stereo
-        inputLeft = in[0][i];
-        inputRight = in[1][i];
+        // Handle Mono vs Stereo. Clamp so a hot signal or a codec glitch cannot push an
+        // out-of-range value into an effect's feedback path.
+        inputLeft = audio_guard::ClampInput(in[0][i]);
+        inputRight = audio_guard::ClampInput(in[1][i]);
 
         // Split the Mono Input to Stereo (Only allowed if relay bypass non enabled)
         if (settings.globalSplitMonoInputToStereo && !settings.globalRelayBypassEnabled) {
@@ -422,6 +463,13 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
             effectOutputLeft = activeEffect->GetAudioLeft();
             effectOutputRight = activeEffect->GetAudioRight();
 
+            // Never let NaN or infinity reach the DAC. Flag it so the main loop can
+            // reset the effect, and mute briefly so the recovery does not pop.
+            if (audio_guard::SanitizePair(effectOutputLeft, effectOutputRight)) {
+                guardTripped = true;
+                guardMuteSamplesRemaining = guardMuteTimeInSamples;
+            }
+
             // Update state of the LEDs
             led1Brightness = activeEffect->GetBrightnessForLED(0);
             led2Brightness = activeEffect->GetBrightnessForLED(1);
@@ -433,6 +481,12 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
 
         out[0][i] = crossFaderLeft.Process(crossFadeSourceLeft, crossFadeTargetLeft);
         out[1][i] = crossFaderRight.Process(crossFadeSourceRight, crossFadeTargetRight);
+
+        if (guardMuteSamplesRemaining > 0) {
+            guardMuteSamplesRemaining -= 1;
+            out[0][i] = 0.0f;
+            out[1][i] = 0.0f;
+        }
     }
 
     // Override LEDs if we are saving the current settings
@@ -450,26 +504,48 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
 }
 
 void SetActiveEffect(int effectID) {
-    if (effectID >= 0 && effectID < availableEffectsCount) {
-        // Store the last used effect
-        prevActiveEffectID = activeEffectID;
-
-        // Update the ID cache
-        activeEffectID = effectID;
-
-        // Update the Active Effect directly.
-        activeEffect = availableEffects[effectID];
-
-        guitarPedalUI.UpdateActiveEffect(effectID);
-
-        // Get a handle to the persitance storage settings
-        Settings &settings = storage.GetSettings();
-
-        // Update the persistant storage setting
-        settings.globalActiveEffectID = effectID;
-
-        last_effect_change_time = System::GetNow();
+    if (effectID < 0 || effectID >= availableEffectsCount || effectID == activeEffectID) {
+        return;
     }
+
+    const bool leavingTuner = (activeEffectID == tunerModuleIndex);
+    const bool enteringTuner = (effectID == tunerModuleIndex);
+
+    // The outgoing module is no longer driven, so it must not report itself as enabled
+    // (its LED brightness and, for some modules, its processing depend on this flag).
+    if (activeEffect != nullptr) {
+        activeEffect->SetEnabled(false);
+    }
+
+    // The tuner is only useful when it is processing audio, so it is always forced on.
+    // Remember the state we came from so leaving the tuner restores it, whichever route
+    // was used to get here (footswitch hold, menu, encoder, MIDI program change).
+    if (enteringTuner && !leavingTuner) {
+        effectOnBeforeTuner = effectOn;
+        effectOn = true;
+    } else if (leavingTuner && !enteringTuner) {
+        effectOn = effectOnBeforeTuner;
+    }
+
+    prevActiveEffectID = activeEffectID;
+    activeEffectID = effectID;
+    activeEffect = availableEffects[effectID];
+
+    // Do not let a knob map left visible from this module's last turn show for a frame
+    // before the UI recomputes it.
+    activeEffect->SetKnobMapVisible(false);
+
+    // The incoming module takes over the current on/off state. Without this the LED
+    // for a module reached through the menu or encoder stayed dark until bypass was
+    // toggled twice.
+    activeEffect->SetEnabled(effectOn);
+
+    guitarPedalUI.UpdateActiveEffect(effectID);
+
+    Settings &settings = storage.GetSettings();
+    settings.globalActiveEffectID = effectID;
+
+    last_effect_change_time = System::GetNow();
 }
 
 // Typical Switch case for Message Type.
@@ -557,10 +633,84 @@ void HandleMidiMessage(MidiEvent m) {
 }
 
 int main(void) {
+    // Paint the unused stack before anything else runs so the high-water mark measures
+    // the deepest point actually reached, not whatever main()'s own prologue used first.
+    StackPaint();
+
     const size_t blockSize = 48;
     const bool boost = true; // true enables cpu boost (480Mhz instead of 400Mhz)
 
     hardware.Init(blockSize, boost);
+
+    // Backup SRAM holds the last crash record across reboots. Enable it before reading.
+    System::InitBackupSram();
+
+    // Route hard faults to our handler so the next boot can say what crashed.
+    InstallCrashHandler();
+
+    // Report a crash from the previous run: the record stays on the screen until a
+    // footswitch is tapped (or, on display-less variants, through five fast blinks of both
+    // LEDs), then it is cleared so it is reported only once.
+    if (CrashRecordIsValid(g_crashRecord)) {
+        if (hardware.SupportsDisplay()) {
+            char line[32];
+            hardware.display.Fill(false);
+            hardware.display.SetCursor(0, 0);
+            hardware.display.WriteString("CRASH last run", Font_7x10, true);
+            hardware.display.SetCursor(0, 11);
+            snprintf(line, sizeof(line), "pc %08lx", (unsigned long)g_crashRecord.pc);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 22);
+            snprintf(line, sizeof(line), "lr %08lx", (unsigned long)g_crashRecord.lr);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 33);
+            snprintf(line, sizeof(line), "cfsr %08lx", (unsigned long)g_crashRecord.cfsr);
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 44);
+            snprintf(line, sizeof(line), "fx %ld  %lus", (long)g_crashRecord.effectID,
+                     (unsigned long)(g_crashRecord.uptimeMs / 1000u));
+            hardware.display.WriteString(line, Font_7x10, true);
+            hardware.display.SetCursor(0, 56);
+            hardware.display.WriteString("tap a footswitch", Font_6x8, true);
+            hardware.display.Update();
+        }
+        for (int i = 0; i < 5; i++) {
+            hardware.SetLed(0, 1.0f);
+            hardware.SetLed(1, 1.0f);
+            hardware.UpdateLeds();
+            System::Delay(200);
+            hardware.SetLed(0, 0.0f);
+            hardware.SetLed(1, 0.0f);
+            hardware.UpdateLeds();
+            System::Delay(200);
+        }
+
+        // Make the crash report impossible to miss: wait for a footswitch tap before
+        // continuing, with a 60 s timeout so an unattended pedal still boots. The watchdog
+        // is not started until later in main(), so this wait cannot trigger it. Display-less
+        // variants have nowhere to show the "tap a footswitch" prompt, so they just keep the
+        // five blinks above and move on.
+        if (hardware.SupportsDisplay()) {
+            const uint32_t kCrashWaitTimeoutMs = 60000;
+            uint32_t waitedMs = 0;
+            bool footswitchTapped = false;
+            while (waitedMs < kCrashWaitTimeoutMs) {
+                hardware.ProcessDigitalControls();
+                for (int i = 0; i < hardware.GetSwitchCount(); i++) {
+                    if (hardware.switches[i].RisingEdge()) {
+                        footswitchTapped = true;
+                        break;
+                    }
+                }
+                if (footswitchTapped) {
+                    break;
+                }
+                System::Delay(10);
+                waitedMs += 10;
+            }
+        }
+        CrashRecordClear(g_crashRecord);
+    }
 
     const float sample_rate = hardware.AudioSampleRate();
 
@@ -571,6 +721,7 @@ int main(void) {
     muteOffTransitionTimeInSamples = hardware.GetNumberOfSamplesForTime(muteOffTransitionTimeInSeconds);
     bypassToggleTransitionTimeInSamples = hardware.GetNumberOfSamplesForTime(bypassToggleTransitionTimeInSeconds);
     crossFaderTransitionTimeInSamples = hardware.GetNumberOfSamplesForTime(crossFaderTransitionTimeInSeconds);
+    guardMuteTimeInSamples = hardware.GetNumberOfSamplesForTime(guardMuteTimeInSeconds);
 
     // Init the Effects Modules
     load_effects(availableEffectsCount, availableEffects);
@@ -593,10 +744,21 @@ int main(void) {
     // Load all the effect specific settings
     LoadEffectSettingsFromPersistantStorage();
 
-    // Set the active effect
-    activeEffect = availableEffects[settings.globalActiveEffectID];
+    // Set the active effect directly. SetActiveEffect cannot be used here because it
+    // refreshes the UI, which is initialized below from the chosen effect. Apply the same
+    // rules it enforces: the tuner is always forced on, and the module takes effectOn.
+    // Keep in sync with the tuner rule in SetActiveEffect.
     activeEffectID = settings.globalActiveEffectID;
+    activeEffect = availableEffects[activeEffectID];
+    if (activeEffectID == tunerModuleIndex) {
+        effectOnBeforeTuner = effectOn;
+        effectOn = true;
+    }
     activeEffect->SetEnabled(effectOn);
+
+    // The startup state is already applied, so the first audio block must not treat it as
+    // a toggle.
+    appliedEffectOn = effectOn;
 
     // Init the Menu UI System
     if (hardware.SupportsDisplay()) {
@@ -637,6 +799,12 @@ int main(void) {
     crossFaderLeft.SetPos(1.0f);
     crossFaderRight.SetPos(1.0f);
 
+    // A hang now becomes a 2-second reboot instead of a frozen pedal. (Hard faults reset
+    // immediately from the crash handler.)
+    if (kEnableWatchdog) {
+        WatchdogStart(kWatchdogTimeoutSeconds);
+    }
+
     // start callback
     hardware.StartAdc();
     hardware.StartAudio(AudioCallback);
@@ -648,6 +816,10 @@ int main(void) {
     // hardware.seed.StartLog();
 
     while (1) {
+        if (kEnableWatchdog) {
+            WatchdogKick();
+        }
+
         // Handle Clock Time
         uint32_t currentTimeStampUS = System::GetUs();
         uint32_t elapsedTimeStampUS = currentTimeStampUS - lastTimeStampUS;
@@ -686,6 +858,24 @@ int main(void) {
             guitarPedalUI.UpdateActiveEffectParameterValues();
         }
 
+        // Recover from non-finite audio: clear the effect's internal state so the bad
+        // value cannot keep recirculating. Parameters are untouched.
+        if (guardTripped) {
+            guardTripped = false;
+            guardTripCount += 1;
+            activeEffect->Reset();
+        }
+
+        // Perform an effect switch the audio callback asked for. Clear the request only
+        // after SetActiveEffect has set effectOn: the callback defers bypass transitions
+        // while a switch is pending (see the transition block in AudioCallback).
+        if (pendingEffectID != -1) {
+            const int id = pendingEffectID;
+            SetActiveEffect(id);
+            std::atomic_signal_fence(std::memory_order_seq_cst); // effectOn written before the clear
+            pendingEffectID = -1;
+        }
+
         // If alt footswitch held AND encoder turned, iterate to next/previous effect, also throttle the changes
         const int encoderIncrement = hardware.encoders[0].Increment();
         if (has_alternate_footswitch &&
@@ -698,6 +888,19 @@ int main(void) {
                 desiredIndex = availableEffectsCount - 1;
             }
             SetActiveEffect(desiredIndex);
+        }
+
+        // Hold the encoder button 3 s to toggle the debug screen (stack, guard trips, tempo).
+        {
+            static bool debugToggleArmed = true;
+            const float heldMs = hardware.encoders[0].TimeHeldMs();
+            if (heldMs > 3000.0f && debugToggleArmed) {
+                useDebugDisplay = !useDebugDisplay;
+                debugToggleArmed = false;
+            }
+            if (heldMs <= 0.0f) {
+                debugToggleArmed = true;
+            }
         }
 
         if (hardware.SupportsDisplay()) {
@@ -728,11 +931,17 @@ int main(void) {
                 sprintf(strbuff, "tap: %d", switchEnabledCache[1]);
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.SetCursor(0, 30);
-                sprintf(strbuff, "dtap: %d", switchDoubleEnabledCache[1]);
+                sprintf(strbuff, "stk %lu/%lu", (unsigned long)StackFreeBytes(), (unsigned long)StackTotalBytes());
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.SetCursor(0, 45);
                 sprintf(strbuff, "BPM %ld", globalTempoBPM);
                 hardware.display.WriteString(strbuff, Font_7x10, true);
+                hardware.display.SetCursor(70, 45);
+                sprintf(strbuff, "grd %lu", (unsigned long)guardTripCount);
+                hardware.display.WriteString(strbuff, Font_7x10, true);
+                hardware.display.SetCursor(0, 56);
+                sprintf(strbuff, "heap %lu/%lu", (unsigned long)HeapUsedBytes(), (unsigned long)HeapTotalBytes());
+                hardware.display.WriteString(strbuff, Font_6x8, true);
                 hardware.display.Update();
             } else {
                 // Handle UI Updates for the UI System
@@ -755,6 +964,10 @@ int main(void) {
                 uint16_t tempPreset = activeEffect->GetCurrentPreset();
                 SaveEffectSettingsToPersitantStorageForEffectID(activeEffectID, tempPreset);
                 guitarPedalUI.ShowSavingSettingsScreen();
+            }
+            // Save may erase and rewrite QSPI flash; start with a full watchdog window.
+            if (kEnableWatchdog) {
+                WatchdogKick();
             }
             storage.Save();
             last_save_time = System::GetNow();

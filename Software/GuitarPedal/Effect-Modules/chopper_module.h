@@ -26,6 +26,7 @@ class ChopperModule : public BaseEffectModule {
     float GetBrightnessForLED(int led_id) const override;
     void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
                 bool isEditing) override;
+    bool UsesKnobMap() const override { return false; }
 
   private:
     Chopper m_chopper;

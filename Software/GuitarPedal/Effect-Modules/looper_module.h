@@ -26,6 +26,7 @@ class LooperModule : public BaseEffectModule {
     void AlternateFootswitchHeldFor1Second() override;
     void DrawUI(OneBitGraphicsDisplay &display, int currentIndex, int numItemsTotal, Rectangle boundsToDrawIn,
                 bool isEditing) override;
+    bool UsesKnobMap() const override { return false; }
 
   private:
     void SetLooperMode();

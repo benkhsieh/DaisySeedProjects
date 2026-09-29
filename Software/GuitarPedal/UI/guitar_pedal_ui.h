@@ -85,6 +85,7 @@ class GuitarPedalUI {
 
     bool m_displayingSaveSettingsNotification;
     float m_secondsSinceLastActiveEffectSettingsSave;
+    float m_secondsSinceKnobActivity;
 };
 } // namespace bkshepherd
 #endif

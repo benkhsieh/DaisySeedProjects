@@ -40,6 +40,7 @@
 #include "Effect-Modules/compressor_module.h"
 #include "Effect-Modules/delay_module.h"
 #include "Effect-Modules/distortion_module.h"
+#include "Effect-Modules/drop_module.h"
 #include "Effect-Modules/flanger_module.h"
 #include "Effect-Modules/geq_module.h"
 #include "Effect-Modules/granulardelay_module.h"
@@ -98,6 +99,7 @@ void load_effects(int &availableEffectsCount, BaseEffectModule **&availableEffec
         new PhaserModule(),
         new FlangerModule(),
         new AmpTremoloModule(),
+        new DropModule(),
 
         // The following require a MIDI keyboard
         // new MidiKeysModule(),

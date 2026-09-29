@@ -155,7 +155,7 @@ Modeled on the Roland RE-201 Space Echo control set, with the Akai Headrush E2's
 
   | Knob | Parameter | Range | Default |
   |---|---|---|---|
-  | 0 | `Rate` | 40 to 800 ms, log curve so the slapback region 80 to 160 ms occupies the first third of the knob; tap tempo sets it | 120 ms |
+  | 0 | `Rate` | 40 to 800 ms, log curve: the slapback octave 80 to 160 ms spans about a quarter of the knob (23 to 46 percent), default 120 ms near 37 percent; tap tempo sets it | 120 ms |
   | 1 | `Repeats` | feedback 0 to 1.1, self-oscillates at the top but is limited by the saturator | 0.25, about one audible repeat |
   | 2 | `Echo Vol` | wet level 0 to 1 | 0.55 |
   | 3 | `Wow Flut` | wow and flutter depth, 0 = clean digital | 0.15 |
@@ -164,7 +164,7 @@ Modeled on the Roland RE-201 Space Echo control set, with the Akai Headrush E2's
 
   Head spacing follows the RE-201: head 2 at 2x and head 3 at 3x the head 1 time. Defaults are what the module loads on first boot and after a preset erase; players save their own presets over them as with every other effect.
 - Feedback loop: soft-clip saturation before the filter, so runaway repeats compress instead of clipping hard. This also keeps the loop finite, which matters for section 2.3. The saturator also gives the single slapback repeat a little grit, which is part of the sound.
-- Alt footswitch: double tap sets Rate from tempo. Alt hold: repeats to maximum while held, for the Space Echo self-oscillation trick, returning on release.
+- Alt footswitch: double tap sets Rate from tempo. Alt hold: repeats to maximum while held, for the Space Echo self-oscillation trick, returning on release. Note that holding Alt to scroll effects with the encoder also counts as a hold, so passing through TapeEcho that way briefly starts the oscillation; the flag clears when the effect is switched away or bypassed.
 - LED 1 pulses at the delay rate.
 - Stereo: same echo on both channels. Spread and ping-pong omitted in this version.
 - Delay buffers in SDRAM, three read taps. CPU cost is close to the existing Delay module.

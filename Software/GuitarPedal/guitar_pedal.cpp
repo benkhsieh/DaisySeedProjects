@@ -8,6 +8,7 @@
 #include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
 #include "Util/crash_handler.h"
+#include "Util/heap.h"
 #include "Util/stack_guard.h"
 #include "Util/watchdog.h"
 
@@ -938,6 +939,9 @@ int main(void) {
                 hardware.display.SetCursor(70, 45);
                 sprintf(strbuff, "grd %lu", (unsigned long)guardTripCount);
                 hardware.display.WriteString(strbuff, Font_7x10, true);
+                hardware.display.SetCursor(0, 56);
+                sprintf(strbuff, "heap %lu/%lu", (unsigned long)HeapUsedBytes(), (unsigned long)HeapTotalBytes());
+                hardware.display.WriteString(strbuff, Font_6x8, true);
                 hardware.display.Update();
             } else {
                 // Handle UI Updates for the UI System

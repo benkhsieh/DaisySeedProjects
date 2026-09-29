@@ -187,6 +187,12 @@ void GuitarPedalUI::InitEffectUiPages() {
 
     // Clean up any dynamically allocated memory
     if (m_activeEffectSettingFloatValues != nullptr) {
+        for (int i = 0; i < m_numActiveEffectSettingsItems; ++i) {
+            if (m_activeEffectSettingFloatValues[i] != nullptr) {
+                delete m_activeEffectSettingFloatValues[i];
+            }
+        }
+
         delete[] m_activeEffectSettingFloatValues;
         m_activeEffectSettingFloatValues = nullptr;
     }

@@ -58,6 +58,7 @@
 #include "Effect-Modules/polyoctave_module.h"
 #include "Effect-Modules/reverb_module.h"
 #include "Effect-Modules/spectral_delay_module.h"
+#include "Effect-Modules/tape_echo_module.h"
 #include "Effect-Modules/tuner_module.h"
 
 // Keyboard modules
@@ -100,6 +101,7 @@ void load_effects(int &availableEffectsCount, BaseEffectModule **&availableEffec
         new FlangerModule(),
         new AmpTremoloModule(),
         new DropModule(),
+        new TapeEchoModule(),
 
         // The following require a MIDI keyboard
         // new MidiKeysModule(),

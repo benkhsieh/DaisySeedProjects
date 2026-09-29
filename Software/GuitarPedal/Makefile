@@ -51,6 +51,7 @@ CPP_SOURCES += Effect-Modules/reverb_module.cpp
 # CPP_SOURCES += Effect-Modules/scifi_module.cpp # removed from the pedal 2026-09-27 to free memory; re-add here and in loaded_effects.h to restore
 CPP_SOURCES += Effect-Modules/scope_module.cpp
 CPP_SOURCES += Effect-Modules/spectral_delay_module.cpp
+CPP_SOURCES += Effect-Modules/tape_echo_module.cpp
 CPP_SOURCES += Effect-Modules/tuner_module.cpp
 #CPP_SOURCES += Effect-Modules/reverb_delay_module.cpp
 

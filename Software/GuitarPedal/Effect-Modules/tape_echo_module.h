@@ -27,6 +27,7 @@ class TapeEchoModule : public BaseEffectModule {
     void SetTempo(uint32_t bpm) override;
     void AlternateFootswitchHeldFor1Second() override;
     void AlternateFootswitchReleased() override;
+    void SetEnabled(bool isEnabled) override;
     float GetBrightnessForLED(int led_id) const override;
     void Reset() override;
 

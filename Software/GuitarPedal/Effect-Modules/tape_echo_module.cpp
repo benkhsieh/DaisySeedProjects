@@ -273,6 +273,16 @@ void TapeEchoModule::AlternateFootswitchHeldFor1Second() { m_oscillateHeld = tru
 
 void TapeEchoModule::AlternateFootswitchReleased() { m_oscillateHeld = false; }
 
+void TapeEchoModule::SetEnabled(bool isEnabled) {
+    // Alt events only reach the active, engaged effect, so a release while bypassed or
+    // after switching away would never arrive. Drop the held state whenever disengaged so
+    // the echo does not come back self-oscillating on the next engage.
+    if (!isEnabled) {
+        m_oscillateHeld = false;
+    }
+    BaseEffectModule::SetEnabled(isEnabled);
+}
+
 float TapeEchoModule::GetBrightnessForLED(int led_id) const {
     const float value = BaseEffectModule::GetBrightnessForLED(led_id);
     if (led_id == 1) {

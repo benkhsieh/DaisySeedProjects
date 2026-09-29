@@ -124,6 +124,15 @@ void DropModule::AlternateFootswitchPressed() { m_altHeld = true; }
 
 void DropModule::AlternateFootswitchReleased() { m_altHeld = false; }
 
+void DropModule::SetEnabled(bool isEnabled) {
+    // Alt events only reach the active, engaged effect, so a release while bypassed or
+    // after switching away would never arrive. Drop the held state whenever disengaged.
+    if (!isEnabled) {
+        m_altHeld = false;
+    }
+    BaseEffectModule::SetEnabled(isEnabled);
+}
+
 void DropModule::ProcessMono(float in) {
     BaseEffectModule::ProcessMono(in);
 
@@ -141,8 +150,12 @@ void DropModule::ProcessMono(float in) {
     }
 
     e->shifter.SetTransposition(-m_semitonesDown * m_rampPosition);
+    // The shifter runs every sample so its buffers stay warm, but its output is blended in
+    // by the ramp: at ramp 0 (MOMENT, Alt up) the output is exactly dry rather than the
+    // shifter's fixed-delay copy. LATCH pins the ramp at 1, so there it is the Mix blend.
     float shifted = e->shifter.Process(in); // non-const: CrossFade::Process takes float&
-    const float out = e->mix.Process(in, shifted);
+    const float mixed = e->mix.Process(in, shifted);
+    const float out = in + m_rampPosition * (mixed - in);
     m_audioLeft = m_audioRight = out;
 }
 

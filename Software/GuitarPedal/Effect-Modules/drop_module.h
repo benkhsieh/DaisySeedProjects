@@ -26,6 +26,7 @@ class DropModule : public BaseEffectModule {
     void ProcessStereo(float inL, float inR) override;
     void AlternateFootswitchPressed() override;
     void AlternateFootswitchReleased() override;
+    void SetEnabled(bool isEnabled) override;
     bool AlternateFootswitchForTempo() const override { return false; }
     float GetBrightnessForLED(int led_id) const override;
     void Reset() override;

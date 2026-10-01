@@ -32,6 +32,7 @@
 
 // Include all effect modules
 #include "Effect-Modules/amp_module.h"
+#include "Effect-Modules/amp_tremolo_module.h"
 #include "Effect-Modules/autopan_module.h"
 #include "Effect-Modules/chopper_module.h"
 #include "Effect-Modules/chorus_module.h"
@@ -39,6 +40,7 @@
 #include "Effect-Modules/compressor_module.h"
 #include "Effect-Modules/delay_module.h"
 #include "Effect-Modules/distortion_module.h"
+#include "Effect-Modules/drop_module.h"
 #include "Effect-Modules/flanger_module.h"
 #include "Effect-Modules/geq_module.h"
 #include "Effect-Modules/granulardelay_module.h"
@@ -56,6 +58,7 @@
 #include "Effect-Modules/polyoctave_module.h"
 #include "Effect-Modules/reverb_module.h"
 #include "Effect-Modules/spectral_delay_module.h"
+#include "Effect-Modules/tape_echo_module.h"
 #include "Effect-Modules/tuner_module.h"
 
 // Keyboard modules
@@ -96,6 +99,9 @@ void load_effects(int &availableEffectsCount, BaseEffectModule **&availableEffec
         new IrModule(),
         new PhaserModule(),
         new FlangerModule(),
+        new AmpTremoloModule(),
+        new DropModule(),
+        new TapeEchoModule(),
 
         // The following require a MIDI keyboard
         // new MidiKeysModule(),

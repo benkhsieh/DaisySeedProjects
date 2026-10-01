@@ -52,7 +52,7 @@ Diagnostics for the next crash: install our own hard-fault handler at runtime (l
 
 ## 3. Footswitch gesture state machine
 
-Today the callback recognizes gestures with scattered timers and flags (`switchEnabledCache`, `ignoreBypassSwitchUntilNextActuation`, and so on). Replace them with one small class, `FootswitchGestures`, fed by the two debounced switches each block, that emits at most one event per block:
+Today the callback recognizes gestures with scattered timers and flags (`switchEnabledCache`, `ignoreBypassSwitchUntilNextActuation`, and so on). Replace them with one small class, `FootswitchGestures`, fed by the two debounced switches each block, that returns a bitmask of the events completed in that block (a quick tap can complete press and release in one block; the firmware applies them in order press, double-tap, hold, release):
 
 | Event | Detection | Action |
 |---|---|---|
@@ -62,7 +62,7 @@ Today the callback recognizes gestures with scattered timers and flags (`switchE
 | Alt double tap | Two Alt taps inside 2 s | Tap tempo, if the module accepts tempo (unchanged) |
 | Alt hold | Alt held 1 s | `AlternateFootswitchHeldFor1Second` (unchanged) |
 | Both tap | Both down within 80 ms of each other, released before 2 s | Next effect in the active group (section 5). If group mode is off, next effect in the full list. |
-| Both hold | Both held 2 s | Save current preset (unchanged) |
+| Both hold | Both held 2 s, whether or not the presses landed inside the 80 ms window (a staggered press still saves and must not trigger the tuner hold) | Save current preset (unchanged) |
 
 Trade-off: the bypass toggle now fires up to 80 ms after the press instead of instantly, to disambiguate from "both tap". Not perceptible at the footswitch.
 

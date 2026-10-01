@@ -8,6 +8,7 @@
 #include "Util/audio_guard.h"
 #include "Util/audio_utilities.h"
 #include "Util/crash_handler.h"
+#include "Util/footswitch_gestures.h"
 #include "Util/heap.h"
 #include "Util/stack_guard.h"
 #include "Util/watchdog.h"
@@ -106,9 +107,6 @@ float secondsSinceStartup = 0.0f;
 bool needToSaveSettingsForActiveEffect = false;
 uint32_t last_save_time; // Time we last set it
 
-// Used to debounce quick switching to/from the tuner
-bool ignoreBypassSwitchUntilNextActuation = false;
-
 // Effect on/off state to restore when leaving the tuner. Owned by SetActiveEffect.
 bool effectOnBeforeTuner = true;
 
@@ -125,12 +123,9 @@ bool *knobValueCacheChanged = nullptr;
 float *knobValueCache = nullptr;
 int *knobValueSamplesTilIdle = nullptr;
 
-// Switch Monitoring Variables
-float switchEnabledIdleTimeInSeconds = 2.0f;
-int switchEnabledIdleTimeInSamples;
-bool *switchEnabledCache = nullptr;
-bool *switchDoubleEnabledCache = nullptr;
-int *switchEnabledSamplesTilIdle = nullptr;
+// Footswitch gesture recognizer (see Util/footswitch_gestures.h). Fed once per audio block.
+FootswitchGestures footswitchGestures;
+const char *volatile lastGestureName = "-"; // for the debug screen; written by the audio callback
 
 // Tempo
 bool needToChangeTempo = false;
@@ -220,136 +215,91 @@ static void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer
         }
     }
 
-    // Process potential footswitch actions before the main switch processing loop
-    if (has_alternate_footswitch) {
-        // Handle the scenario where have 2 footswitches
+    // Footswitch gestures. The recognizer decides what the player meant; this block maps
+    // each gesture to an action. Alt events reach the module only while the effect is on.
+    {
+        const int bypassId = hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Bypass);
+        const int altId = hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate);
+        const bool bypassDown = hardware.switches[bypassId].Pressed();
+        const bool altDown = has_alternate_footswitch ? hardware.switches[altId].Pressed() : false;
+        const float blockMs = hardware.GetTimeForNumberOfSamples(size) * 1000.0f;
+        const uint32_t ev = footswitchGestures.Update(bypassDown, altDown, blockMs);
 
-        // If both footswitches are down, save the parameters for this effect to
-        // persistant storage If there is only one footswitch, it will do
-        // parameter saving here when held instead of tuner quick switching later
-        if (hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Bypass)].TimeHeldMs() > 2000 &&
-            hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)].TimeHeldMs() >
-                2000 &&
-            !guitarPedalUI.IsShowingSavingSettingsScreen() && !ignoreBypassSwitchUntilNextActuation) {
-
-            needToSaveSettingsForActiveEffect = true;
-            ignoreBypassSwitchUntilNextActuation = true;
-        }
-
-        // If bypass is held for 2 seconds and alternate footswitch is not
-        // pressed (not trying to save) then perform an action
-        if (hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Bypass)].TimeHeldMs() > 2000 &&
-            !hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)].Pressed() &&
-            !ignoreBypassSwitchUntilNextActuation) {
-
-            // If we have a screen and there is a tuner module, we quick switch
-            // to it, otherwise we just cycle through the effects
-            if (hardware.SupportsDisplay() && tunerModuleIndex > 0) {
-                // The rising edge of this same press already toggled effectOn. Undo that
-                // so SetActiveEffect saves and restores the state the player actually had.
+        if (ev & FootswitchGestures::kBypassTap) {
+            lastGestureName = "byp tap";
+            if (!isCrossFading) {
                 effectOn = !effectOn;
+            }
+        }
 
-                // The main loop performs the switch (see pendingEffectID).
-                if (activeEffectID == tunerModuleIndex) {
-                    pendingEffectID = prevActiveEffectID;
-                } else {
-                    pendingEffectID = tunerModuleIndex;
+        if (ev & FootswitchGestures::kBypassHold) {
+            lastGestureName = "byp hold";
+            if (!has_alternate_footswitch) {
+                // Single-footswitch variants save on a long press.
+                if (!guitarPedalUI.IsShowingSavingSettingsScreen()) {
+                    needToSaveSettingsForActiveEffect = true;
                 }
-                ignoreBypassSwitchUntilNextActuation = true;
+            } else if (hardware.SupportsDisplay() && tunerModuleIndex > 0) {
+                // The tap at the start of this press already toggled effectOn. Undo that so
+                // SetActiveEffect saves and restores the state the player actually had.
+                effectOn = !effectOn;
+                pendingEffectID = (activeEffectID == tunerModuleIndex) ? prevActiveEffectID : tunerModuleIndex;
             } else {
-                // Cycle to the next effect
-                int newActiveEffectId = activeEffectID + 1;
-
-                // Skip over the tuner if there is no screen
-                if (newActiveEffectId == tunerModuleIndex) {
-                    newActiveEffectId++;
-                }
-
-                if (newActiveEffectId > availableEffectsCount - 1) {
-                    newActiveEffectId = 0;
-                }
-
-                // Cycling on a screenless pedal lands on the new effect bypassed. The main
-                // loop performs the switch (see pendingEffectID).
+                // Screenless pedal: cycle to the next effect, landing bypassed.
+                int next = activeEffectID + 1;
+                if (next == tunerModuleIndex)
+                    next++;
+                if (next > availableEffectsCount - 1)
+                    next = 0;
                 effectOn = false;
-                pendingEffectID = newActiveEffectId;
-
-                ignoreBypassSwitchUntilNextActuation = true;
+                pendingEffectID = next;
             }
         }
 
-        // Disable quick switching until the footswitch is released to prevent infinite switching
-        // also prevents saving from toggling quick switch.
-        if (ignoreBypassSwitchUntilNextActuation &&
-            !hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Bypass)].Pressed()) {
-            ignoreBypassSwitchUntilNextActuation = false;
+        if (ev & FootswitchGestures::kAltPress) {
+            lastGestureName = "alt press";
+            if (effectOn)
+                activeEffect->AlternateFootswitchPressed();
         }
-    } else {
-        // Handle the scenario where we only have 1 footswitch
-        if (hardware.switches[hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Bypass)].TimeHeldMs() > 2000 &&
-            !guitarPedalUI.IsShowingSavingSettingsScreen()) {
-            needToSaveSettingsForActiveEffect = true;
-        }
-    }
-
-    // Process the switches
-    for (int i = 0; i < hardware.GetSwitchCount(); i++) {
-        bool switchPressed = hardware.switches[i].RisingEdge();
-
-        // If this is the bypass switch, check for a bypass transition already
-        // in progress (isCrossFading), and toggle the effect if the switch is
-        // pressed
-        if (!ignoreBypassSwitchUntilNextActuation && !isCrossFading &&
-            i == hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Bypass) && switchPressed) {
-            effectOn = !effectOn;
-        }
-
-        if (effectOn && switchPressed && i == hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)) {
-            activeEffect->AlternateFootswitchPressed();
-        }
-
-        bool switchReleased = hardware.switches[i].FallingEdge();
-        if (effectOn && switchReleased && i == hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)) {
-            activeEffect->AlternateFootswitchReleased();
-        }
-
-        bool switchHeld = hardware.switches[i].TimeHeldMs() >= 1000.f;
-        if (effectOn && switchHeld && i == hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)) {
-            activeEffect->AlternateFootswitchHeldFor1Second();
-        }
-
-        if (switchEnabledCache[i] == true) {
-            switchEnabledSamplesTilIdle[i] -= size;
-
-            if (switchEnabledSamplesTilIdle[i] <= 0) {
-                switchEnabledCache[i] = false;
-
-                if (switchDoubleEnabledCache[i] != true) {
-                    // We can safely know this was only a single tap here.
-                }
-
-                switchDoubleEnabledCache[i] = false;
+        if (ev & FootswitchGestures::kAltDoubleTap) {
+            lastGestureName = "alt dbl";
+            if (activeEffect->AlternateFootswitchForTempo()) {
+                needToChangeTempo = true;
+                globalTempoBPM = s_to_tempo(footswitchGestures.LastDoubleTapIntervalMs() * 0.001f);
             }
         }
+        if (ev & FootswitchGestures::kAltHold) {
+            if (effectOn)
+                activeEffect->AlternateFootswitchHeldFor1Second();
+        }
+        if (ev & FootswitchGestures::kAltRelease) {
+            lastGestureName = "alt rel";
+            if (effectOn)
+                activeEffect->AlternateFootswitchReleased();
+        }
 
-        if (switchPressed) {
-            // Note that switch is pressed and reset the IdleTimer for detecting double presses
-            switchEnabledCache[i] = switchPressed;
-
-            if (switchEnabledSamplesTilIdle[i] > 0) {
-                switchDoubleEnabledCache[i] = true;
-
-                // Register as Tap Tempo if Switch ID matched preferred mapping for TapTempo
-                if (activeEffect->AlternateFootswitchForTempo() &&
-                    i == hardware.GetPreferredSwitchIDForSpecialFunctionType(SpecialFunctionType::Alternate)) {
-                    needToChangeTempo = true;
-                    float timeBetweenPresses =
-                        hardware.GetTimeForNumberOfSamples(switchEnabledIdleTimeInSamples - switchEnabledSamplesTilIdle[i]);
-                    globalTempoBPM = s_to_tempo(timeBetweenPresses);
-                }
+        if (ev & FootswitchGestures::kBothTap) {
+            lastGestureName = "both tap";
+            // Jump to the next effect (Phase 4 restricts this to the active group).
+            int next = activeEffectID + 1;
+            if (!hardware.SupportsDisplay() && next == tunerModuleIndex)
+                next++;
+            if (next > availableEffectsCount - 1)
+                next = 0;
+            if (next == tunerModuleIndex && hardware.SupportsDisplay()) {
+                // Skip the tuner when jumping; it has its own hold gesture.
+                next++;
+                if (next > availableEffectsCount - 1)
+                    next = 0;
             }
+            pendingEffectID = next;
+        }
 
-            switchEnabledSamplesTilIdle[i] = switchEnabledIdleTimeInSamples;
+        if (ev & FootswitchGestures::kBothHold) {
+            lastGestureName = "both hold";
+            if (!guitarPedalUI.IsShowingSavingSettingsScreen()) {
+                needToSaveSettingsForActiveEffect = true;
+            }
         }
     }
 
@@ -507,6 +457,9 @@ void SetActiveEffect(int effectID) {
     if (effectID < 0 || effectID >= availableEffectsCount || effectID == activeEffectID) {
         return;
     }
+
+    // Mute briefly around the swap so the new module's first samples cannot click.
+    guardMuteSamplesRemaining = guardMuteTimeInSamples;
 
     const bool leavingTuner = (activeEffectID == tunerModuleIndex);
     const bool enteringTuner = (effectID == tunerModuleIndex);
@@ -781,16 +734,14 @@ int main(void) {
     knobValueSamplesTilIdle = new int[hardware.GetKnobCount()];
     knobValueIdleTimeInSamples = hardware.GetNumberOfSamplesForTime(knobValueIdleTimeInSeconds);
 
-    // Init the Switch Monitoring System
-    switchEnabledCache = new bool[hardware.GetSwitchCount()];
-    switchDoubleEnabledCache = new bool[hardware.GetSwitchCount()];
-    switchEnabledSamplesTilIdle = new int[hardware.GetSwitchCount()];
-    switchEnabledIdleTimeInSamples = hardware.GetNumberOfSamplesForTime(switchEnabledIdleTimeInSeconds);
-
-    for (int i = 0; i < hardware.GetSwitchCount(); i++) {
-        switchEnabledCache[i] = false;
-        switchDoubleEnabledCache[i] = false;
-        switchEnabledSamplesTilIdle[i] = 0;
+    // Init the footswitch gesture recognizer. Single-footswitch variants have no both-gestures
+    // to wait for, so a zero window keeps the Bypass toggle on the press block.
+    {
+        FootswitchGestures::Config gestureConfig{};
+        if (!has_alternate_footswitch) {
+            gestureConfig.bothWindowMs = 0.0f;
+        }
+        footswitchGestures.Init(gestureConfig);
     }
 
     // Setup the cross fader
@@ -928,7 +879,7 @@ int main(void) {
                 hardware.display.SetCursor(0, 0);
                 hardware.display.WriteString("Debug:", Font_7x10, true);
                 hardware.display.SetCursor(0, 15);
-                sprintf(strbuff, "tap: %d", switchEnabledCache[1]);
+                snprintf(strbuff, sizeof(strbuff), "gst %s", lastGestureName);
                 hardware.display.WriteString(strbuff, Font_7x10, true);
                 hardware.display.SetCursor(0, 30);
                 sprintf(strbuff, "stk %lu/%lu", (unsigned long)StackFreeBytes(), (unsigned long)StackTotalBytes());

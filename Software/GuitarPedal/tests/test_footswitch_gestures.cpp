@@ -22,6 +22,7 @@ struct Script {
     float t = 0;
     std::vector<Rec> log;
     Script() { g.Init(G::Config{}); }
+    explicit Script(const G::Config &c) { g.Init(c); }
     // Hold the given states for ms, recording every non-empty event mask with its time.
     void run(bool byp, bool alt, float ms) {
         for (float e = 0; e < ms; e += 1.0f) {
@@ -168,6 +169,60 @@ static void test_both_hold_needs_both_switches_down() {
     CHECK(s.count(G::kAltPress) == 0);
     CHECK(s.count(G::kAltHold) == 0);
 }
+// Fix round. Bypass first, Alt 120 ms later (outside the window): holding both 2 s still saves,
+// and lifting Alt first must not then fire the tuner hold.
+static void test_staggered_both_hold_saves_and_blocks_bypass_hold() {
+    Script s;
+    s.run(true, false, 120);
+    s.run(true, true, 2880);
+    s.run(true, false, 100);
+    s.run(false, false, 50);
+    CHECK(s.count(G::kBothHold) == 1);
+    CHECK(s.first(G::kBothHold) == 2120);
+    CHECK(s.count(G::kBypassHold) == 0);
+}
+// An Alt rise consumed by a both-gesture must not arm the double-tap clock.
+static void test_both_tap_then_alt_tap_is_not_a_double_tap() {
+    Script s;
+    s.run(true, true, 100);
+    s.run(false, false, 400);
+    s.run(false, true, 40);
+    s.run(false, false, 50);
+    CHECK(s.count(G::kBothTap) == 1);
+    CHECK(s.count(G::kAltPress) == 1);
+    CHECK(s.count(G::kAltDoubleTap) == 0);
+}
+// Both-hold needs continuous contact: lifting one switch and pressing it again does not save.
+static void test_both_hold_needs_continuous_contact() {
+    Script s;
+    s.run(true, true, 100);
+    s.run(false, true, 50);
+    s.run(true, true, 2350);
+    s.run(false, false, 50);
+    CHECK(s.count(G::kBothHold) == 0);
+    CHECK(s.count(G::kBypassTap) == 1);
+}
+// A Bypass release in the same block as an Alt rise is two separate presses, not a both-gesture.
+static void test_release_and_rise_in_same_block_is_not_both() {
+    Script s;
+    s.run(true, false, 30);
+    s.run(false, true, 40);
+    s.run(false, false, 50);
+    CHECK(s.count(G::kBothTap) == 0);
+    CHECK(s.count(G::kBypassTap) == 1);
+    CHECK(s.first(G::kBypassTap) == 31);
+    CHECK(s.count(G::kAltPress) == 1);
+}
+// Single-footswitch variants use a zero both-window: the tap commits on the rise block.
+static void test_zero_window_commits_on_rise() {
+    G::Config c;
+    c.bothWindowMs = 0.0f;
+    Script s(c);
+    s.run(true, false, 30);
+    s.run(false, false, 50);
+    CHECK(s.count(G::kBypassTap) == 1);
+    CHECK(s.first(G::kBypassTap) == 1);
+}
 int main() {
     test_quick_bypass_tap_fires_on_release();
     test_bypass_tap_fires_at_window_when_held_longer();
@@ -182,6 +237,11 @@ int main() {
     test_bypass_hold_blocked_while_alt_down();
     test_new_press_after_both_gesture_works_normally();
     test_both_hold_needs_both_switches_down();
+    test_staggered_both_hold_saves_and_blocks_bypass_hold();
+    test_both_tap_then_alt_tap_is_not_a_double_tap();
+    test_both_hold_needs_continuous_contact();
+    test_release_and_rise_in_same_block_is_not_both();
+    test_zero_window_commits_on_rise();
     if (!failures)
         std::printf("test_footswitch_gestures: all passed\n");
     return failures ? 1 : 0;

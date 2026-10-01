@@ -45,6 +45,7 @@ class FootswitchGestures {
         m_bothHeldMs = 0.0f;
         m_bothHoldEmitted = false;
         m_bothTapArmed = false;
+        m_staggeredHoldEmitted = false;
         m_sinceLastAltRiseMs = kFarPast;
         m_altRiseInterval = kFarPast;
         m_lastDoubleTapIntervalMs = 0.0f;
@@ -71,6 +72,8 @@ class FootswitchGestures {
         const bool altRise = altDown && !m_alt.down;
         const bool altFall = !altDown && m_alt.down;
 
+        if (bypassRise || altRise)
+            m_staggeredHoldEmitted = false;
         if (bypassRise)
             m_bypass.Press(dtMs);
         if (altRise) {
@@ -80,8 +83,9 @@ class FootswitchGestures {
         }
 
         // Both-gesture: the second switch rises while the first is down and still inside
-        // its window and not yet committed as an individual press.
-        if (!m_both && m_bypass.down && m_alt.down && !m_bypass.emitted && !m_alt.emitted && !m_bypass.consumed && !m_alt.consumed &&
+        // its window and not yet committed as an individual press. Uses the current inputs,
+        // so a release in the same block as the other switch's rise is two separate presses.
+        if (!m_both && bypassDown && altDown && !m_bypass.emitted && !m_alt.emitted && !m_bypass.consumed && !m_alt.consumed &&
             m_bypass.heldMs <= m_cfg.bothWindowMs && m_alt.heldMs <= m_cfg.bothWindowMs) {
             m_both = true;
             m_bothHeldMs = dtMs; // the second rise block counts, as for a single press
@@ -89,6 +93,9 @@ class FootswitchGestures {
             m_bothTapArmed = true;
             m_bypass.consumed = true;
             m_alt.consumed = true;
+            // A consumed Alt rise must not start (or complete) a tap-tempo interval.
+            m_sinceLastAltRiseMs = kFarPast;
+            m_altRiseInterval = kFarPast;
         }
 
         // Commit individual presses.
@@ -103,6 +110,16 @@ class FootswitchGestures {
                 ev |= kAltDoubleTap;
                 m_lastDoubleTapIntervalMs = m_altRiseInterval;
             }
+        }
+
+        // Staggered both-hold: the presses were too far apart for a both-gesture, but both have
+        // been held for bothHoldMs. Save anyway, and suppress the Bypass hold (tuner jump) that
+        // would otherwise fire if Alt is lifted first.
+        if (!m_both && !m_staggeredHoldEmitted && bypassDown && altDown && m_bypass.heldMs >= m_cfg.bothHoldMs &&
+            m_alt.heldMs >= m_cfg.bothHoldMs) {
+            m_staggeredHoldEmitted = true;
+            m_bypass.holdEmitted = true;
+            ev |= kBothHold;
         }
 
         // Holds. These need the switch down in this block, so a release block never fires one.
@@ -132,6 +149,10 @@ class FootswitchGestures {
             if ((bypassFall || altFall) && m_bothTapArmed) {
                 m_bothTapArmed = false;
                 ev |= kBothTap;
+            }
+            // Both-hold needs continuous contact; a re-press after any release cannot save.
+            if (bypassFall || altFall) {
+                m_bothHoldEmitted = true;
             }
             if (!bypassDown && !altDown) {
                 m_both = false;
@@ -174,6 +195,7 @@ class FootswitchGestures {
     float m_bothHeldMs = 0.0f;
     bool m_bothHoldEmitted = false;
     bool m_bothTapArmed = false;
+    bool m_staggeredHoldEmitted = false; // staggered both-hold already sent for these presses
     float m_sinceLastAltRiseMs = kFarPast;
     float m_altRiseInterval = kFarPast;
     float m_lastDoubleTapIntervalMs = 0.0f;

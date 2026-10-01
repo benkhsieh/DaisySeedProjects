@@ -734,8 +734,15 @@ int main(void) {
     knobValueSamplesTilIdle = new int[hardware.GetKnobCount()];
     knobValueIdleTimeInSamples = hardware.GetNumberOfSamplesForTime(knobValueIdleTimeInSeconds);
 
-    // Init the footswitch gesture recognizer
-    footswitchGestures.Init(FootswitchGestures::Config{});
+    // Init the footswitch gesture recognizer. Single-footswitch variants have no both-gestures
+    // to wait for, so a zero window keeps the Bypass toggle on the press block.
+    {
+        FootswitchGestures::Config gestureConfig{};
+        if (!has_alternate_footswitch) {
+            gestureConfig.bothWindowMs = 0.0f;
+        }
+        footswitchGestures.Init(gestureConfig);
+    }
 
     // Setup the cross fader
     crossFaderLeft.Init();
